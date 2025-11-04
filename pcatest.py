@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-# DI Futures PCA — Backtesting Engine (gdqh (3).py)
+# Futures Curve PCA — Backtesting Engine
 #
-# This script performs a walk-forward backtest of the PCA-based
-# yield curve forecasting models for SOFR/DI instruments using contract data.
+# This script performs a walk-forward validation (backtest) of the PCA-based
+# yield curve forecasting models for any futures/rates contracts provided.
+#
 # ---------------------------------------------------------------------------------
 
 import io
@@ -21,7 +22,8 @@ import warnings
 
 # --- Setup ---
 warnings.filterwarnings("ignore")
-st.set_page_config(layout="wide", page_title="DI Curve Backtesting Engine")
+# Renamed title to be asset-agnostic
+st.set_page_config(layout="wide", page_title="Futures Curve Backtesting Engine")
 sns.set_style("whitegrid")
 plt.rcParams["figure.dpi"] = 120
 
@@ -65,7 +67,7 @@ def calculate_ttm(valuation_ts, expiry_ts, holidays_np, year_basis):
     return np.nan if bd <= 0 else bd / float(year_basis)
 
 def build_std_grid_by_rule(max_year=7.0):
-    """Defines the standard set of TTM tenors for the curve based on 0.25Y increments (DI-style)."""
+    """Defines the standard set of TTM tenors for the PCA grid (0.25Y increments up to 3Y)."""
     # Fine grid: 0.25Y increments up to 3.0 years
     a = list(np.round(np.arange(0.25, 3.0 + 0.001, 0.25), 2))
     # Mid grid: 0.5Y increments up to 5.0 years
@@ -210,6 +212,7 @@ def forecast_pcs_arima(PCs_df):
              forecasts.append(series.iloc[-1])
     return np.array(forecasts).reshape(1, -1)
 
+# --- CORE TRANSFORMATION FUNCTION FOR DISPLAY (Price/Rate Toggle) ---
 def transform_curve_for_display(curve_vector, all_cols_full, display_unit):
     """
     Transforms the full curve vector (Rates, Spreads, Flies) from Rate-space 
@@ -218,6 +221,7 @@ def transform_curve_for_display(curve_vector, all_cols_full, display_unit):
     if display_unit == "Rates (%)":
         return curve_vector
 
+    # Identify the indices for Outright Rates and for Differences (Spreads/Flies)
     rates_cols = [c for c in all_cols_full if '-' not in c]
     diff_cols = [c for c in all_cols_full if '-' in c]
     
@@ -230,15 +234,15 @@ def transform_curve_for_display(curve_vector, all_cols_full, display_unit):
     transformed_curve[rates_indices] = 100.0 - transformed_curve[rates_indices]
 
     # 2. Transform Spreads/Flies (Differences) by negating them
-    # Price Spread = P_B - P_A = (100-R_B) - (100-R_A) = R_A - R_B = - (R_B - R_A) = - (Rate Spread)
+    # Price Spread = P_B - P_A = (100-R_B) - (100-R_A) = R_A - R_B = - (Rate Spread)
     transformed_curve[diff_indices] = -transformed_curve[diff_indices]
 
     return transformed_curve
 # ---------------------------------------------------------------------------------
 
 def main():
-    st.title("🏛️ DI Curve Backtesting Engine")
-    st.markdown("This tool performs a walk-forward backtest of PCA-based curve forecasting models.")
+    st.title("🏛️ Futures Curve Backtesting Engine")
+    st.markdown("This tool performs a walk-forward backtest of PCA-based curve forecasting models using **your uploaded data** (e.g., SOFR, DI, Eurodollar).")
     st.markdown("---")
 
     # --- 1) File Uploads ---
@@ -249,8 +253,7 @@ def main():
 
     # --- 2) Model and Backtest Config ---
     st.sidebar.header("2) Configure Backtest")
-    # Using specific dates here for robustness, you may change these
-    backtest_start_date = st.sidebar.date_input("Backtest Start Date", pd.to_datetime('2024-01-01').date()) 
+    backtest_start_date = st.sidebar.date_input("Backtest Start Date", pd.to_datetime('2024-01-01').date())
     backtest_end_date = st.sidebar.date_input("Backtest End Date", pd.to_datetime('2024-03-31').date())
     training_window_days = st.sidebar.number_input("Rolling Training Window (business days)", min_value=120, max_value=500, value=252, step=1)
     
@@ -268,6 +271,7 @@ def main():
 
     # --- 3) Display Unit Selector ---
     st.sidebar.header("3) Visualization Options")
+    # This selector ensures all results are shown as Price (Index) if selected
     display_unit = st.sidebar.selectbox("Display Results as", ["Rates (%)", "Price (Index)"])
 
     # --- Initialize session state ---
@@ -276,35 +280,29 @@ def main():
     if 'selected_date_index' not in st.session_state: st.session_state.selected_date_index = 0
     if 'selected_spread_date_index' not in st.session_state: st.session_state.selected_spread_date_index = 0
     
-    # --- Callbacks for Next/Prev Buttons and Syncing (FIXED) ---
+    # --- Callbacks for Next/Prev Buttons and Syncing ---
     def next_date():
-        """Updates the index for the Outright Rates visualization."""
         if st.session_state.selected_date_index < len(st.session_state.unique_dates) - 1:
             st.session_state.selected_date_index += 1
 
     def prev_date():
-        """Updates the index for the Outright Rates visualization."""
         if st.session_state.selected_date_index > 0:
             st.session_state.selected_date_index -= 1
 
     def next_spread_date():
-        """Updates the index for the Spreads/Flies visualization."""
         if st.session_state.selected_spread_date_index < len(st.session_state.unique_dates) - 1:
             st.session_state.selected_spread_date_index += 1
 
     def prev_spread_date():
-        """Updates the index for the Spreads/Flies visualization."""
         if st.session_state.selected_spread_date_index > 0:
             st.session_state.selected_spread_date_index -= 1
             
     def sync_rates_index():
-        """Updates the rates index when the selectbox is manually changed."""
         unique_dates = st.session_state.unique_dates
         if unique_dates.size > 0 and st.session_state.rates_date_select in unique_dates:
             st.session_state.selected_date_index = unique_dates.tolist().index(st.session_state.rates_date_select)
 
     def sync_spreads_index():
-        """Updates the spreads index when the selectbox is manually changed."""
         unique_dates = st.session_state.unique_dates
         if unique_dates.size > 0 and st.session_state.spreads_date_select in unique_dates:
             st.session_state.selected_spread_date_index = unique_dates.tolist().index(st.session_state.spreads_date_select)
@@ -466,7 +464,7 @@ def main():
                 'MAE': np.nanmean(np.abs(pred - actual))
             })
         
-        # Errors are calculated on the rate-space curve 
+        # Errors are calculated on the rate-space curve (magnitudes are identical in price space)
         results_df[['Daily_RMSE_Rates', 'Daily_MAE_Rates']] = results_df.apply(lambda row: calculate_errors(row, std_cols_f), axis=1)
         results_df[['Daily_RMSE_Spreads', 'Daily_MAE_Spreads']] = results_df.apply(lambda row: calculate_errors(row, spread_cols_f), axis=1)
         results_df[['Daily_RMSE_Flies', 'Daily_MAE_Flies']] = results_df.apply(lambda row: calculate_errors(row, fly_cols_f), axis=1)
@@ -490,6 +488,12 @@ def main():
 
         prev_col, date_col, next_col = st.columns([1, 4, 1])
         
+        # Ensure the date index is clamped within bounds before setting the selectbox index
+        if st.session_state.selected_date_index >= len(unique_dates):
+             st.session_state.selected_date_index = len(unique_dates) - 1
+        if st.session_state.selected_date_index < 0:
+             st.session_state.selected_date_index = 0
+
         prev_col.button("◀ Previous", key="rates_prev", on_click=prev_date)
         next_col.button("Next ▶", key="rates_next", on_click=next_date)
         
@@ -546,6 +550,12 @@ def main():
         st.subheader(f"Daily Visualization (Spreads and Flies - {unit_label} Differences)")
 
         prev_col, spread_date_col, next_col = st.columns([1, 4, 1])
+
+        # Ensure the date index is clamped within bounds before setting the selectbox index
+        if st.session_state.selected_spread_date_index >= len(unique_dates):
+             st.session_state.selected_spread_date_index = len(unique_dates) - 1
+        if st.session_state.selected_spread_date_index < 0:
+             st.session_state.selected_spread_date_index = 0
         
         prev_col.button("◀ Previous", key="spread_prev", on_click=prev_spread_date)
         next_col.button("Next ▶", key="spread_next", on_click=next_spread_date)
