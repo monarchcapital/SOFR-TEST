@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# SOFR Contract PCA — Backtesting Engine (sofr_contract_pca_backtest_v3.py)
+# SOFR Contract PCA — Backtesting Engine (sofr_contract_pca_backtest_v5.py)
 #
 # This script performs a walk-forward validation (backtest) of the PCA-based
 # yield curve forecasting models for SOFR instruments using contract data.
@@ -283,7 +283,8 @@ def main():
     st.sidebar.header("3) Curve Definition & Grid")
     grid_style_sel = st.sidebar.selectbox("Standard Tenor Grid Style", ["0.25Y Increments (DI-style)", "US Standard"])
     max_tenor_pca = st.sidebar.slider("Maximum Tenor for PCA Model (Years)", min_value=5, max_value=30, value=10, step=1)
-    max_tenor_plot = st.sidebar.slider("Maximum Tenor for Graphs (Years)", min_value=0.5, max_value=float(max_tenor_pca), value=5.0, step=0.5)
+    # This slider sets the USER'S PREFERENCE for the max plot tenor
+    max_tenor_plot_pref = st.sidebar.slider("Maximum Tenor for Graphs (Years)", min_value=0.5, max_value=float(max_tenor_pca), value=5.0, step=0.5)
 
     # --- Initialize session state for UI state and results ---
     if 'results_df' not in st.session_state: st.session_state.results_df = None
@@ -291,7 +292,7 @@ def main():
     if 'selected_date_index' not in st.session_state: st.session_state.selected_date_index = 0
     if 'selected_spread_date_index' not in st.session_state: st.session_state.selected_spread_date_index = 0
 
-    # --- CALLBACK DEFINITIONS (FIXED NameError) ---
+    # --- CALLBACK DEFINITIONS (FIXED NAVIGATION LOGIC) ---
     def next_date(key):
         if key == 'rates' and st.session_state.selected_date_index < len(st.session_state.unique_dates) - 1:
             st.session_state.selected_date_index += 1
@@ -303,7 +304,20 @@ def main():
             st.session_state.selected_date_index -= 1
         elif key == 'spreads' and st.session_state.selected_spread_date_index > 0:
             st.session_state.selected_spread_date_index -= 1
-    # -----------------------------------------------
+            
+    def sync_rates_index():
+        """Updates the rates index in session state when the selectbox is manually changed."""
+        unique_dates = st.session_state.unique_dates
+        if unique_dates is not None and st.session_state.rates_date_select in unique_dates:
+            st.session_state.selected_date_index = unique_dates.tolist().index(st.session_state.rates_date_select)
+
+    def sync_spreads_index():
+        """Updates the spreads index in session state when the selectbox is manually changed."""
+        unique_dates = st.session_state.unique_dates
+        if unique_dates is not None and st.session_state.spreads_date_select in unique_dates:
+            st.session_state.selected_spread_date_index = unique_dates.tolist().index(st.session_state.spreads_date_select)
+            
+    # ----------------------------
 
     # --- Load Data and Determine Date Range (Dynamic) ---
     yields_df, expiry_df, holidays_np = None, None, None
@@ -370,7 +384,7 @@ def main():
         backtest_range = pd.bdate_range(start=backtest_start_date, end=backtest_end_date)
         all_available_dates = yields_df.index
 
-        # Setup custom grid for PCA model training
+        # Setup custom grid for PCA model training (This is the fixed full grid)
         std_arr, std_cols = build_std_grid_by_rule(rule_name=grid_style_sel, max_year=float(max_tenor_pca))
         spread_cols = [f"{std_cols[i]}-{std_cols[i-1]}" for i in range(1, len(std_cols))]
         fly_cols = [f"{std_cols[i+1]}x{std_cols[i]}x{std_cols[i-1]}" for i in range(1, len(std_cols) - 1)]
@@ -458,6 +472,7 @@ def main():
     if 'results_df' in st.session_state and st.session_state.results_df is not None:
         results_df = st.session_state.results_df.copy()
         
+        # Data validation and error calculation setup
         mask = results_df['Actual_Curve'].apply(lambda x: isinstance(x, float) or np.isnan(x).all())
         results_df = results_df[~mask].copy()
 
@@ -466,9 +481,10 @@ def main():
             st.stop()
 
         all_cols = results_df.iloc[0]['Column_Names']
-        std_cols = [c for c in all_cols if 'x' not in c and '-' not in c]
-        spread_cols = [c for c in all_cols if '-' in c and 'x' not in c]
-        fly_cols = [c for c in all_cols if 'x' in c]
+        std_cols_full = [c for c in all_cols if 'x' not in c and '-' not in c]
+        spread_cols_full = [c for c in all_cols if '-' in c and 'x' not in c]
+        fly_cols_full = [c for c in all_cols if 'x' in c]
+        std_arr_full = build_std_grid_by_rule(rule_name=grid_style_sel, max_year=float(max_tenor_pca))[0]
 
         def calculate_errors(row, cols):
             indices = [all_cols.index(c) for c in cols]
@@ -480,9 +496,9 @@ def main():
                 'MAE': np.nanmean(np.abs(pred - actual))
             })
         
-        results_df[['Daily_RMSE_Rates', 'Daily_MAE_Rates']] = results_df.apply(lambda row: calculate_errors(row, std_cols), axis=1)
-        results_df[['Daily_RMSE_Spreads', 'Daily_MAE_Spreads']] = results_df.apply(lambda row: calculate_errors(row, spread_cols), axis=1)
-        results_df[['Daily_RMSE_Flies', 'Daily_MAE_Flies']] = results_df.apply(lambda row: calculate_errors(row, fly_cols), axis=1)
+        results_df[['Daily_RMSE_Rates', 'Daily_MAE_Rates']] = results_df.apply(lambda row: calculate_errors(row, std_cols_full), axis=1)
+        results_df[['Daily_RMSE_Spreads', 'Daily_MAE_Spreads']] = results_df.apply(lambda row: calculate_errors(row, spread_cols_full), axis=1)
+        results_df[['Daily_RMSE_Flies', 'Daily_MAE_Flies']] = results_df.apply(lambda row: calculate_errors(row, fly_cols_full), axis=1)
 
         st.header("📊 Backtest Performance Analysis")
 
@@ -500,42 +516,69 @@ def main():
 
         unique_dates = results_df['Date'].dt.date.unique()
         st.session_state.unique_dates = unique_dates
-        std_arr_full, std_cols_full = build_std_grid_by_rule(rule_name=grid_style_sel, max_year=float(max_tenor_pca))
 
-        # Filter for Plotting Range
-        max_plot_index = next((i for i, t in enumerate(std_arr_full) if t > max_tenor_plot), len(std_arr_full))
-        plot_std_arr = std_arr_full[:max_plot_index]
-        plot_std_cols = std_cols_full[:max_plot_index]
-        
-        if grid_style_sel == "0.25Y Increments (DI-style)":
-            plot_labels = [f"{t:.2f}Y" for t in plot_std_arr]
-        else:
-            plot_labels = [f"{int(t)}Y" for t in plot_std_arr]
-        
         col_p, col_d, col_n = st.columns([1, 4, 1])
         
-        # FIXED: Callbacks are now correctly defined in main()
         col_p.button("◀ Previous", key="rates_prev", on_click=prev_date, args=('rates',))
         col_n.button("Next ▶", key="rates_next", on_click=next_date, args=('rates',))
         
+        # Use st.session_state.selected_date_index to force the selectbox position
         selected_date = col_d.selectbox(
             "Select a date to inspect",
             options=unique_dates,
-            index=st.session_state.selected_date_index
+            index=st.session_state.selected_date_index,
+            key="rates_date_select",  # Added key
+            on_change=sync_rates_index # Added sync handler
         )
         
         if selected_date:
             plot_data = results_df[results_df['Date'].dt.date == selected_date]
             if not plot_data.empty:
-                indices = [all_cols.index(c) for c in plot_std_cols]
-                actual_c = plot_data['Actual_Curve'].iloc[0][indices]
-                pred_c = plot_data['Predicted_Curve'].iloc[0][indices]
+                full_actual_curve_vector = plot_data['Actual_Curve'].iloc[0]
+                
+                # --- Dynamic TTM Cap Logic for Rates ---
+                rates_indices = [all_cols.index(c) for c in std_cols_full]
+                actual_rates = full_actual_curve_vector[rates_indices]
 
+                # Find the index of the last non-NaN rate
+                valid_indices = np.where(~np.isnan(actual_rates))[0]
+                
+                if valid_indices.size > 0:
+                    last_valid_rate_index = valid_indices[-1]
+                    data_max_tenor = std_arr_full[last_valid_rate_index]
+                else:
+                    data_max_tenor = 0.0
+
+                # Effective max tenor is the minimum of user's setting and data availability
+                effective_max_tenor_plot = min(max_tenor_plot_pref, data_max_tenor)
+
+                # Re-filter plotting arrays based on the effective max tenor
+                max_plot_index = next((i for i, t in enumerate(std_arr_full) if t > effective_max_tenor_plot), len(std_arr_full))
+                
+                if max_plot_index == 0 or effective_max_tenor_plot < 0.25:
+                    st.warning(f"No valid contract data available for interpolation up to the requested tenor on {selected_date}.")
+                    st.stop()
+                    
+                plot_std_arr = std_arr_full[:max_plot_index]
+                plot_std_cols = std_cols_full[:max_plot_index]
+
+                if grid_style_sel == "0.25Y Increments (DI-style)":
+                    plot_labels = [f"{t:.2f}Y" for t in plot_std_arr]
+                else:
+                    plot_labels = [f"{int(t)}Y" for t in plot_std_arr]
+                
+                # Now, indices are taken from the full column list, but using the filtered plot_std_cols
+                indices = [all_cols.index(c) for c in plot_std_cols]
+                actual_c = full_actual_curve_vector[indices]
+                pred_full_curve_vector = plot_data['Predicted_Curve'].iloc[0]
+                pred_c = pred_full_curve_vector[indices]
+
+                # --- Plotting ---
                 fig, ax = plt.subplots(figsize=(14, 7))
                 ax.plot(plot_std_arr, actual_c, label=f"Actual on {selected_date}", color='royalblue', marker='o', linestyle='-')
                 ax.plot(plot_std_arr, pred_c, label=f"Predicted for {selected_date}", color='darkorange', marker='x', linestyle='--')
                 
-                ax.set_title(f"Yield Curve Forecast vs. Actual for {selected_date} (Plotting up to {max_tenor_plot}Y)", fontsize=16)
+                ax.set_title(f"Yield Curve Forecast vs. Actual for {selected_date} (Max Tenor: {effective_max_tenor_plot:.2f}Y)", fontsize=16)
                 ax.set_xlabel("Standardized Maturity (Years)")
                 ax.set_ylabel(f"Rate ({rate_unit})")
                 ax.set_xticks(plot_std_arr)
@@ -560,34 +603,57 @@ def main():
 
         col_p, col_d, col_n = st.columns([1, 4, 1])
         
-        # FIXED: Callbacks are now correctly defined in main()
         col_p.button("◀ Previous", key="spreads_prev", on_click=prev_date, args=('spreads',))
         col_n.button("Next ▶", key="spreads_next", on_click=next_date, args=('spreads',))
         
+        # Use st.session_state.selected_spread_date_index to force the selectbox position
         selected_spread_date = col_d.selectbox(
             "Select a date to inspect spreads/flies",
             options=unique_dates,
-            index=st.session_state.selected_spread_date_index
+            index=st.session_state.selected_spread_date_index,
+            key="spreads_date_select", # Added key
+            on_change=sync_spreads_index # Added sync handler
         )
         
         if selected_spread_date:
             plot_data = results_df[results_df['Date'].dt.date == selected_spread_date]
             if not plot_data.empty:
+                full_actual_curve_vector = plot_data['Actual_Curve'].iloc[0]
                 
-                # Filter Spread and Fly columns for Plotting Range
-                plot_std_cols_set = set(plot_std_cols)
-                plot_spread_cols = [c for c in spread_cols if all(t in plot_std_cols_set for t in c.split('-'))]
-                plot_fly_cols = [c for c in fly_cols if all(t in plot_std_cols_set for t in c.split('x'))]
+                # --- Dynamic TTM Cap Logic (Re-used) ---
+                rates_indices = [all_cols.index(c) for c in std_cols_full]
+                actual_rates = full_actual_curve_vector[rates_indices]
+                valid_indices = np.where(~np.isnan(actual_rates))[0]
+                
+                if valid_indices.size > 0:
+                    last_valid_rate_index = valid_indices[-1]
+                    data_max_tenor = std_arr_full[last_valid_rate_index]
+                else:
+                    data_max_tenor = 0.0
 
+                effective_max_tenor_plot = min(max_tenor_plot_pref, data_max_tenor)
+                max_plot_index = next((i for i, t in enumerate(std_arr_full) if t > effective_max_tenor_plot), len(std_arr_full))
+                
+                if max_plot_index < 3:
+                    st.warning(f"Not enough data to form spreads or flies (requires min 3 rates) on {selected_spread_date} within the selected tenor range.")
+                    st.stop()
+                    
+                # Use the calculated plot_std_cols/arr from the Rates section for consistency
+                plot_std_cols = std_cols_full[:max_plot_index]
+                
+                # Filter Spread and Fly columns for the new dynamically capped Plotting Range
+                plot_std_cols_set = set(plot_std_cols)
+                plot_spread_cols = [c for c in spread_cols_full if all(t in plot_std_cols_set for t in c.split('-'))]
+                plot_fly_cols = [c for c in fly_cols_full if all(t in plot_std_cols_set for t in c.split('x'))]
 
                 # Indices for Spreads
                 spread_indices = [all_cols.index(c) for c in plot_spread_cols]
-                actual_spreads = plot_data['Actual_Curve'].iloc[0][spread_indices]
+                actual_spreads = full_actual_curve_vector[spread_indices]
                 pred_spreads = plot_data['Predicted_Curve'].iloc[0][spread_indices]
                 
                 # Indices for Flies
                 fly_indices = [all_cols.index(c) for c in plot_fly_cols]
-                actual_flies = plot_data['Actual_Curve'].iloc[0][fly_indices]
+                actual_flies = full_actual_curve_vector[fly_indices]
                 pred_flies = plot_data['Predicted_Curve'].iloc[0][fly_indices]
 
                 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
@@ -595,7 +661,7 @@ def main():
                 # Spreads Plot
                 ax1.plot(plot_spread_cols, actual_spreads, marker='o', linestyle='-', color='royalblue', label=f"Actual Spreads")
                 ax1.plot(plot_spread_cols, pred_spreads, marker='x', linestyle='--', color='darkorange', label="Predicted Spreads")
-                ax1.set_title(f"Spread Forecast vs. Actual for {selected_spread_date} (Short-End)")
+                ax1.set_title(f"Spread Forecast vs. Actual for {selected_spread_date} (Max Tenor: {effective_max_tenor_plot:.2f}Y)")
                 ax1.set_ylabel("Spread (%)")
                 ax1.set_xticklabels(plot_spread_cols, rotation=45, ha="right")
                 ax1.grid(True, which='both', linestyle='--', linewidth=0.5)
@@ -604,7 +670,7 @@ def main():
                 # Flies Plot
                 ax2.plot(plot_fly_cols, actual_flies, marker='o', linestyle='-', color='royalblue', label=f"Actual Flies")
                 ax2.plot(plot_fly_cols, pred_flies, marker='x', linestyle='--', color='darkorange', label="Predicted Flies")
-                ax2.set_title(f"Butterfly Forecast vs. Actual for {selected_spread_date} (Short-End)")
+                ax2.set_title(f"Butterfly Forecast vs. Actual for {selected_spread_date} (Max Tenor: {effective_max_tenor_plot:.2f}Y)")
                 ax2.set_ylabel("Fly (%)")
                 ax2.set_xticklabels(plot_fly_cols, rotation=45, ha="right")
                 ax2.grid(True, which='both', linestyle='--', linewidth=0.5)
@@ -620,18 +686,18 @@ def main():
         raw_df = pd.DataFrame(results_df['Date']).set_index('Date')
         
         rates_start_idx = 0
-        spreads_start_idx = len(std_cols)
-        flies_start_idx = spreads_start_idx + len(spread_cols)
+        spreads_start_idx = len(std_cols_full)
+        flies_start_idx = spreads_start_idx + len(spread_cols_full)
 
-        for i, col in enumerate(std_cols):
+        for i, col in enumerate(std_cols_full):
             raw_df[f"Predicted_Rate_{col}"] = results_df['Predicted_Curve'].apply(lambda x: x[rates_start_idx + i])
             raw_df[f"Actual_Rate_{col}"] = results_df['Actual_Curve'].apply(lambda x: x[rates_start_idx + i])
 
-        for i, col in enumerate(spread_cols):
+        for i, col in enumerate(spread_cols_full):
             raw_df[f"Predicted_Spread_{col}"] = results_df['Predicted_Curve'].apply(lambda x: x[spreads_start_idx + i])
             raw_df[f"Actual_Spread_{col}"] = results_df['Actual_Curve'].apply(lambda x: x[spreads_start_idx + i])
             
-        for i, col in enumerate(fly_cols):
+        for i, col in enumerate(fly_cols_full):
             raw_df[f"Predicted_Fly_{col}"] = results_df['Predicted_Curve'].apply(lambda x: x[flies_start_idx + i])
             raw_df[f"Actual_Fly_{col}"] = results_df['Actual_Curve'].apply(lambda x: x[flies_start_idx + i])
 
