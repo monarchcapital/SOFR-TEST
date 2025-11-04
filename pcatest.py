@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# SOFR Contract PCA — Backtesting Engine (sofr_contract_pca_backtest_custom.py)
+# SOFR Contract PCA — Backtesting Engine (sofr_contract_pca_backtest_v2.py)
 #
 # This script performs a walk-forward validation (backtest) of the PCA-based
 # yield curve forecasting models for SOFR instruments using contract data.
@@ -65,10 +65,10 @@ def calculate_ttm(valuation_ts, expiry_ts, holidays_np, year_basis):
     bd = np_busdays_exclusive(valuation_ts, expiry_ts, holidays_np)
     return np.nan if bd <= 0 else bd / float(year_basis)
 
-def build_std_grid_by_rule(rule_name="0.25Y Increments (DI-style)", max_year=10.0):
+@st.cache_data
+def build_std_grid_by_rule(rule_name, max_year):
     """
     Defines the standard set of TTM tenors for the curve based on a selection rule.
-    Returns: list of TTM floats (std_arr), list of TTM string labels (std_cols).
     """
     max_year = float(max_year)
     if rule_name == "US Standard":
@@ -78,23 +78,28 @@ def build_std_grid_by_rule(rule_name="0.25Y Increments (DI-style)", max_year=10.
         std_grid_cols = [f"{int(t)}Y" for t in std_grid_tenors]
         
     elif rule_name == "0.25Y Increments (DI-style)":
-        # Fine grid: 0.25Y, 0.5Y, 0.75Y, 1.0Y, 1.25Y...
+        # Fine grid: 0.25Y, 0.5Y, 0.75Y, 1.0Y, 1.25Y, ..., 2.0Y, ..., 5.0Y, ...
+        
+        # Fine grid for the short end
         tenors_fine = np.round(np.arange(0.25, 3.0 + 0.001, 0.25), 2)
-        tenors_medium = np.round(np.arange(3.5, 5.0 + 0.001, 0.5), 2)
-        tenors_long = np.round(np.arange(6.0, 30.0 + 0.001, 1.0), 2)
+        # Medium grid for mid-curve
+        tenors_medium = np.round(np.arange(3.5, 7.0 + 0.001, 0.5), 2)
+        # Coarse grid for long end
+        tenors_long = np.round(np.arange(8.0, 30.0 + 0.001, 1.0), 2)
         
         tenors = np.unique(np.concatenate([tenors_fine, tenors_medium, tenors_long]))
         tenors = tenors[tenors <= max_year]
 
         std_grid_tenors = tenors
+        # Clean labels: 0.25Y, 1.00Y (avoiding .25Y, 1Y mixed styles)
         std_grid_cols = [f"{t:.2f}Y" for t in std_grid_tenors]
         
     else:
-        # Fallback to the fine grid
         return build_std_grid_by_rule("0.25Y Increments (DI-style)", max_year)
     
     return list(std_grid_tenors), std_grid_cols
 
+# ... (row_to_std_grid and build_pca_matrix remain the same as the last version) ...
 def row_to_std_grid(dt, row_series, available_contracts, expiry_df, std_arr, holidays_np, year_basis, rate_unit, interp_method):
     """
     Interpolates a single day's raw contract rates to the standard TTM grid.
@@ -123,7 +128,6 @@ def row_to_std_grid(dt, row_series, available_contracts, expiry_df, std_arr, hol
         try:
             min_ttm = min(ttm_list)
             max_ttm = max(ttm_list)
-            # Only target TTM points covered by the input data range
             target_ttm = np.array([t for t in std_arr if t >= min_ttm and t <= max_ttm])
             
             if len(target_ttm) == 0:
@@ -137,11 +141,9 @@ def row_to_std_grid(dt, row_series, available_contracts, expiry_df, std_arr, hol
             
             interpolated_rates = f(target_ttm)
             
-            # Map the interpolated rates back to the full standard grid
             result_rates = np.full(len(std_arr), np.nan, dtype=float)
             for i, t in enumerate(std_arr):
                 if t in target_ttm:
-                    # Use a small tolerance for float comparison
                     match_index = np.where(np.isclose(target_ttm, t))[0]
                     if match_index.size > 0:
                         result_rates[i] = interpolated_rates[match_index[0]]
@@ -202,11 +204,7 @@ def build_pca_matrix(yields_df_train, expiry_df, std_arr, std_cols, holidays_np,
 
     return pd.DataFrame(pca_vals, index=pca_df_combined.index, columns=pca_df_combined.columns)
 
-
-# ---------------------------------------------------------------------------------
-# PCA AND FORECASTING FUNCTIONS
-# ---------------------------------------------------------------------------------
-
+# ... (PCA and Forecasting Functions remain the same) ...
 def forecast_pcs_var(PCs_df, lags=1):
     """Forecasts the next Principal Component vector using VAR."""
     if len(PCs_df) < lags + 5: return PCs_df.iloc[-1:].values
@@ -231,135 +229,126 @@ def forecast_pcs_arima(PCs_df):
 # STREAMLIT UI AND EXECUTION
 # ---------------------------------------------------------------------------------
 
+@st.cache_data(show_spinner="Loading and sanitizing data...")
+def load_all_data(yield_file, expiry_file, holiday_file):
+    # Yields
+    yields_df = pd.read_csv(io.StringIO(yield_file.getvalue().decode("utf-8")))
+    date_col = yields_df.columns[0]
+    yields_df[date_col] = yields_df[date_col].apply(safe_to_datetime)
+    yields_df = yields_df.dropna(subset=[date_col]).set_index(date_col).sort_index()
+    yields_df.columns = [str(c).strip() for c in yields_df.columns]
+    for c in yields_df.columns:
+        yields_df[c] = pd.to_numeric(yields_df[c], errors="coerce")
+    
+    # Expiry
+    expiry_raw = pd.read_csv(io.StringIO(expiry_file.getvalue().decode("utf-8")))
+    expiry_df = expiry_raw.iloc[:, :2].copy()
+    expiry_df.columns = ["MATURITY", "DATE"]
+    expiry_df["MATURITY"] = expiry_df["MATURITY"].astype(str).str.strip().str.upper()
+    expiry_df["DATE"] = expiry_df["DATE"].apply(safe_to_datetime)
+    expiry_df = expiry_df.dropna(subset=["DATE"]).set_index("MATURITY")
+
+    # Holidays
+    holidays_np = np.array([], dtype="datetime64[D]")
+    if holiday_file:
+        hol_df = pd.read_csv(io.StringIO(holiday_file.getvalue().decode("utf-8")))
+        hol_series = hol_df.iloc[:, 0].apply(safe_to_datetime).dropna()
+        if not hol_series.empty:
+            holidays_np = np.array(hol_series.dt.date, dtype="datetime64[D]")
+            
+    return yields_df, expiry_df, holidays_np
+
 def main():
     st.title("🏛️ SOFR Contract PCA Backtesting Engine")
     st.markdown("This tool performs a walk-forward backtest of PCA-based curve forecasting models for **contract-based** yields.")
     st.markdown("---")
 
-    # --- Sidebar Inputs ---
+    # --- 1) File Uploads ---
     st.sidebar.header("1) Upload Data")
     st.sidebar.info("Requires Yield data, Expiry Map (contract tickers), and Holidays.")
     yield_file = st.sidebar.file_uploader("Yield data CSV (Daily Rates by Contract Ticker)", type="csv")
     expiry_file = st.sidebar.file_uploader("Expiry mapping CSV (Contract Ticker -> Date)", type="csv")
     holiday_file = st.sidebar.file_uploader("Holiday dates CSV (US Federal Holidays)", type="csv")
 
+    # --- 2) Model and Backtest Config (Always visible) ---
     st.sidebar.header("2) Configure Backtest")
     training_window_days = st.sidebar.number_input("Rolling Training Window (business days)", min_value=120, max_value=500, value=252, step=1)
-
-    st.sidebar.header("3) Model Parameters")
+    
+    st.sidebar.subheader("Model Parameters")
     n_components_sel = st.sidebar.slider("Number of PCA components", 1, 10, 3)
     forecast_model_type = st.sidebar.selectbox("Forecasting Model to Test", ["VAR (Vector Autoregression)", "ARIMA (per Component)", "PCA Fair Value"])
     var_lags = 1
     if forecast_model_type == "VAR (Vector Autoregression)":
         var_lags = st.sidebar.number_input("VAR model lags", min_value=1, max_value=5, value=1, step=1)
-
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("4) Curve Definition & Grid")
-    grid_style_sel = st.sidebar.selectbox("Standard Tenor Grid Style", ["0.25Y Increments (DI-style)", "US Standard"])
-    
-    # Max tenor for PCA (must be the longest tenor for accurate modeling)
-    max_tenor_pca = st.sidebar.slider("Maximum Tenor for PCA Model (Years)", min_value=5, max_value=30, value=10, step=1)
-    
-    # Max tenor for Plotting (user requested up to 5 years, so default to 5)
-    max_tenor_plot = st.sidebar.slider("Maximum Tenor for Graphs (Years)", min_value=0.5, max_value=float(max_tenor_pca), value=5.0, step=0.5)
-
+        
     st.sidebar.subheader("Data Conventions")
     rate_unit = st.sidebar.selectbox("Input rate unit", ["Percent (e.g. 5.45)", "Decimal (e.g. 0.0545)", "Basis points (e.g. 545)"])
     year_basis = int(st.sidebar.selectbox("Year Basis for TTM (e.g. 252 or 365)", [252, 365], index=0))
-    interp_method = "linear" # Hardcoded for consistency
+    interp_method = "linear" # Hardcoded
 
-    # --- Run Button ---
+    # --- 3) Curve Definition & Grid (Always visible) ---
+    st.sidebar.header("3) Curve Definition & Grid")
+    grid_style_sel = st.sidebar.selectbox("Standard Tenor Grid Style", ["0.25Y Increments (DI-style)", "US Standard"])
+    max_tenor_pca = st.sidebar.slider("Maximum Tenor for PCA Model (Years)", min_value=5, max_value=30, value=10, step=1)
+    max_tenor_plot = st.sidebar.slider("Maximum Tenor for Graphs (Years)", min_value=0.5, max_value=float(max_tenor_pca), value=5.0, step=0.5)
+
+    # --- Load Data and Determine Date Range (Dynamic) ---
+    yields_df, expiry_df, holidays_np = None, None, None
+    backtest_start_date, backtest_end_date = None, None
+    
+    if all([yield_file, expiry_file]):
+        yields_df, expiry_df, holidays_np = load_all_data(yield_file, expiry_file, holiday_file)
+        
+        if yields_df is not None and not yields_df.empty:
+            st.sidebar.header("4) Select Backtest Period")
+            
+            max_date = yields_df.index.max().date()
+            min_data_start = yields_df.index.min().date()
+            
+            # Calculate the earliest valid start date: min_data_start + lookback margin
+            min_lookback_dt = yields_df.index.min() + pd.DateOffset(days=training_window_days * 1.5)
+            min_valid_start_date = min_lookback_dt.date()
+            
+            # Ensure the minimum date is within the overall data range
+            min_valid_start_date = max(min_valid_start_date, min_data_start)
+            
+            if min_valid_start_date >= max_date:
+                st.sidebar.error("Data period is too short for the selected training window.")
+                # We can't proceed meaningfully, but let the user try.
+            else:
+                # Default start date is the min valid start date
+                default_start_date = min_valid_start_date
+                
+                date_range = st.sidebar.date_input(
+                    "Select Start and End Dates",
+                    value=[default_start_date, max_date],
+                    min_value=min_data_start,
+                    max_value=max_date
+                )
+                
+                if len(date_range) == 2:
+                    backtest_start_date = pd.to_datetime(date_range[0])
+                    backtest_end_date = pd.to_datetime(date_range[1])
+
+    st.sidebar.markdown("---")
     run_backtest = st.sidebar.button("Run Backtest", type="primary")
 
-    # --- Initialize session state for UI state and results ---
-    if 'results_df' not in st.session_state: st.session_state.results_df = None
-    if 'unique_dates' not in st.session_state: st.session_state.unique_dates = []
-    if 'selected_date_index' not in st.session_state: st.session_state.selected_date_index = 0
-    if 'selected_spread_date_index' not in st.session_state: st.session_state.selected_spread_date_index = 0
-
-    # --- Callbacks for Next/Prev Buttons ---
-    def next_date(key):
-        if key == 'rates' and st.session_state.selected_date_index < len(st.session_state.unique_dates) - 1:
-            st.session_state.selected_date_index += 1
-        elif key == 'spreads' and st.session_state.selected_spread_date_index < len(st.session_state.unique_dates) - 1:
-            st.session_state.selected_spread_date_index += 1
-
-    def prev_date(key):
-        if key == 'rates' and st.session_state.selected_date_index > 0:
-            st.session_state.selected_date_index -= 1
-        elif key == 'spreads' and st.session_state.selected_spread_date_index > 0:
-            st.session_state.selected_spread_date_index -= 1
-
-    # --- Data Loading and Validation ---
+    # --- Backtest Execution ---
     if run_backtest:
-        st.session_state.results_df = None # Clear previous results
-
-        if not all([yield_file, expiry_file]):
-            st.error("Please upload the Yield data CSV and the Expiry mapping CSV.")
-            st.stop()
-
-        @st.cache_data(show_spinner="Loading and sanitizing data...")
-        def load_all_data(yield_file, expiry_file, holiday_file):
-            # Yields
-            yields_df = pd.read_csv(io.StringIO(yield_file.getvalue().decode("utf-8")))
-            date_col = yields_df.columns[0]
-            yields_df[date_col] = yields_df[date_col].apply(safe_to_datetime)
-            yields_df = yields_df.dropna(subset=[date_col]).set_index(date_col).sort_index()
-            yields_df.columns = [str(c).strip() for c in yields_df.columns]
-            for c in yields_df.columns:
-                yields_df[c] = pd.to_numeric(yields_df[c], errors="coerce")
-            
-            # Expiry
-            expiry_raw = pd.read_csv(io.StringIO(expiry_file.getvalue().decode("utf-8")))
-            expiry_df = expiry_raw.iloc[:, :2].copy()
-            expiry_df.columns = ["MATURITY", "DATE"]
-            expiry_df["MATURITY"] = expiry_df["MATURITY"].astype(str).str.strip().str.upper()
-            expiry_df["DATE"] = expiry_df["DATE"].apply(safe_to_datetime)
-            expiry_df = expiry_df.dropna(subset=["DATE"]).set_index("MATURITY")
-
-            # Holidays
-            holidays_np = np.array([], dtype="datetime64[D]")
-            if holiday_file:
-                hol_df = pd.read_csv(io.StringIO(holiday_file.getvalue().decode("utf-8")))
-                hol_series = hol_df.iloc[:, 0].apply(safe_to_datetime).dropna()
-                if not hol_series.empty:
-                    holidays_np = np.array(hol_series.dt.date, dtype="datetime64[D]")
-                    
-            return yields_df, expiry_df, holidays_np
-
-        yields_df, expiry_df, holidays_np = load_all_data(yield_file, expiry_file, holiday_file)
-
-        # --- Date Range Selection ---
-        st.sidebar.subheader("Backtest Period")
-        max_date = yields_df.index.max().date()
-        min_date = yields_df.index.min().date()
-
-        initial_start_date = min_date + timedelta(days=training_window_days * 1.5)
-        if initial_start_date >= max_date:
-            initial_start_date = max_date - timedelta(days=training_window_days * 1.5)
-            if initial_start_date <= min_date: initial_start_date = min_date
-            
-        date_range = st.sidebar.date_input(
-            "Select Start and End Dates",
-            value=[initial_start_date, max_date],
-            min_value=min_date,
-            max_value=max_date
-        )
-        
-        if len(date_range) != 2:
-            st.warning("Please select a start and an end date for the backtest.")
-            st.stop()
-
-        backtest_start_date = pd.to_datetime(date_range[0])
-        backtest_end_date = pd.to_datetime(date_range[1])
-
-        if backtest_start_date >= backtest_end_date:
-            st.error("Backtest Start Date must be before the End Date.")
+        if yields_df is None or expiry_df is None:
+            st.error("Please upload the required data files (Yields, Expiry).")
             st.stop()
         
-        # --------------------------
-        # BACKTESTING LOOP
-        # --------------------------
+        if backtest_start_date is None or backtest_end_date is None or backtest_start_date >= backtest_end_date:
+            st.error("Please select a valid, non-empty Backtest Period.")
+            st.stop()
+            
+        # Final check on training window viability
+        min_required_date = yields_df.index.min() + pd.DateOffset(days=training_window_days * 1.5)
+        if backtest_start_date < min_required_date:
+            st.warning(f"Starting backtest on {backtest_start_date.date()} may result in a partial or invalid training window (less than {training_window_days} business days) for the initial few steps.")
+
+
         st.subheader("Running Walk-Forward Backtest...")
         
         results = []
@@ -419,10 +408,9 @@ def main():
                 delta_curve = pca.inverse_transform(delta_pcs)
                 pred_full_curve = last_actual_full_curve + delta_curve.flatten()
 
-            # Build the ACTUAL curve for comparison (using the interpolated rates of the actual day T)
+            # Build the ACTUAL curve for comparison 
             actual_full_curve_series = build_pca_matrix(
-                yields_df.loc[[current_date]], 
-                expiry_df, std_arr, std_cols, holidays_np, year_basis, rate_unit, interp_method
+                yields_df.loc[[current_date]], expiry_df, std_arr, std_cols, holidays_np, year_basis, rate_unit, interp_method
             )
             
             if actual_full_curve_series.empty: continue
@@ -451,9 +439,10 @@ def main():
     # --------------------------
     # RESULTS ANALYSIS
     # --------------------------
-    if st.session_state.results_df is not None:
+    if 'results_df' in st.session_state and st.session_state.results_df is not None:
         results_df = st.session_state.results_df.copy()
         
+        # ... (Error calculation remains the same) ...
         mask = results_df['Actual_Curve'].apply(lambda x: isinstance(x, float) or np.isnan(x).all())
         results_df = results_df[~mask].copy()
 
@@ -496,20 +485,21 @@ def main():
 
         unique_dates = results_df['Date'].dt.date.unique()
         st.session_state.unique_dates = unique_dates
-        std_arr, std_cols_full = build_std_grid_by_rule(rule_name=grid_style_sel, max_year=float(max_tenor_pca))
+        std_arr_full, std_cols_full = build_std_grid_by_rule(rule_name=grid_style_sel, max_year=float(max_tenor_pca))
 
         # Filter for Plotting Range
-        max_plot_index = next((i for i, t in enumerate(std_arr) if t > max_tenor_plot), len(std_arr))
-        plot_std_arr = std_arr[:max_plot_index]
+        max_plot_index = next((i for i, t in enumerate(std_arr_full) if t > max_tenor_plot), len(std_arr_full))
+        plot_std_arr = std_arr_full[:max_plot_index]
         plot_std_cols = std_cols_full[:max_plot_index]
         
-        # Determine labels based on grid style
         if grid_style_sel == "0.25Y Increments (DI-style)":
             plot_labels = [f"{t:.2f}Y" for t in plot_std_arr]
         else:
             plot_labels = [f"{int(t)}Y" for t in plot_std_arr]
         
         col_p, col_d, col_n = st.columns([1, 4, 1])
+        if 'selected_date_index' not in st.session_state: st.session_state.selected_date_index = 0
+        
         col_p.button("◀ Previous", key="rates_prev", on_click=prev_date, args=('rates',))
         col_n.button("Next ▶", key="rates_next", on_click=next_date, args=('rates',))
         
@@ -522,7 +512,6 @@ def main():
         if selected_date:
             plot_data = results_df[results_df['Date'].dt.date == selected_date]
             if not plot_data.empty:
-                # Use the filtered columns/indices for plotting
                 indices = [all_cols.index(c) for c in plot_std_cols]
                 actual_c = plot_data['Actual_Curve'].iloc[0][indices]
                 pred_c = plot_data['Predicted_Curve'].iloc[0][indices]
@@ -555,6 +544,8 @@ def main():
         st.subheader("Daily Visualization (Spreads and Flies)")
 
         col_p, col_d, col_n = st.columns([1, 4, 1])
+        if 'selected_spread_date_index' not in st.session_state: st.session_state.selected_spread_date_index = 0
+        
         col_p.button("◀ Previous", key="spreads_prev", on_click=prev_date, args=('spreads',))
         col_n.button("Next ▶", key="spreads_next", on_click=next_date, args=('spreads',))
         
@@ -569,8 +560,11 @@ def main():
             if not plot_data.empty:
                 
                 # Filter Spread and Fly columns for Plotting Range
-                plot_spread_cols = [c for c in spread_cols if c.split('-')[1] in plot_std_cols]
-                plot_fly_cols = [c for c in fly_cols if c.split('x')[2] in plot_std_cols]
+                # Only include spreads/flies where ALL component tenors are within the plot range
+                plot_std_cols_set = set(plot_std_cols)
+                plot_spread_cols = [c for c in spread_cols if all(t in plot_std_cols_set for t in c.split('-'))]
+                plot_fly_cols = [c for c in fly_cols if all(t in plot_std_cols_set for t in c.split('x'))]
+
 
                 # Indices for Spreads
                 spread_indices = [all_cols.index(c) for c in plot_spread_cols]
