@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # DI Futures PCA — Backtesting Engine (gdqh (3).py)
 #
-# This script performs a walk-forward validation (backtest) of the PCA-based
+# This script performs a walk-forward backtest of the PCA-based
 # yield curve forecasting models for SOFR/DI instruments using contract data.
 # ---------------------------------------------------------------------------------
 
@@ -73,7 +73,6 @@ def build_std_grid_by_rule(max_year=7.0):
     # Long grid: 1.0Y increments up to max_year
     c = list(np.round(np.arange(6.0, max_year + 0.001, 1.0), 2))
     
-    # Combine, sort, and remove duplicates
     tenors = np.unique(np.array(a + b + c))
     return list(tenors[tenors <= max_year])
 
@@ -104,7 +103,7 @@ def row_to_std_grid(dt, row_series, available_contracts, expiry_df, std_arr, hol
 
 def build_pca_matrix(yields_df_train, expiry_df, std_arr, holidays_np, year_basis, rate_unit, interp_method):
     """Builds the full PCA input matrix (Rates, Spreads, Flies) from interpolated data."""
-    # Step 1: Create a DataFrame for zero rates on the standard grid
+    
     std_cols = [f"{m:.2f}Y" for m in std_arr]
     pca_df_zeros = pd.DataFrame(np.nan, index=yields_df_train.index, columns=std_cols, dtype=float)
     available_contracts = yields_df_train.columns
@@ -211,7 +210,6 @@ def forecast_pcs_arima(PCs_df):
              forecasts.append(series.iloc[-1])
     return np.array(forecasts).reshape(1, -1)
 
-# --- CORE TRANSFORMATION FUNCTION FOR DISPLAY ---
 def transform_curve_for_display(curve_vector, all_cols_full, display_unit):
     """
     Transforms the full curve vector (Rates, Spreads, Flies) from Rate-space 
@@ -220,8 +218,6 @@ def transform_curve_for_display(curve_vector, all_cols_full, display_unit):
     if display_unit == "Rates (%)":
         return curve_vector
 
-    # Identify the indices for Outright Rates and for Differences (Spreads/Flies)
-    # Spreads and Flies contain a '-' but Outright Rates do not.
     rates_cols = [c for c in all_cols_full if '-' not in c]
     diff_cols = [c for c in all_cols_full if '-' in c]
     
@@ -231,11 +227,10 @@ def transform_curve_for_display(curve_vector, all_cols_full, display_unit):
     transformed_curve = curve_vector.copy()
 
     # 1. Transform Rates to Price (Price = 100 - Rate)
-    # Note: Assumes rates are in % (0 to 100), which is enforced by denormalize_to_percent
     transformed_curve[rates_indices] = 100.0 - transformed_curve[rates_indices]
 
     # 2. Transform Spreads/Flies (Differences) by negating them
-    # Rate Spread = R_B - R_A. Price Spread = P_B - P_A = (100-R_B) - (100-R_A) = R_A - R_B = - (R_B - R_A)
+    # Price Spread = P_B - P_A = (100-R_B) - (100-R_A) = R_A - R_B = - (R_B - R_A) = - (Rate Spread)
     transformed_curve[diff_indices] = -transformed_curve[diff_indices]
 
     return transformed_curve
@@ -254,7 +249,8 @@ def main():
 
     # --- 2) Model and Backtest Config ---
     st.sidebar.header("2) Configure Backtest")
-    backtest_start_date = st.sidebar.date_input("Backtest Start Date", pd.to_datetime('2024-01-01').date())
+    # Using specific dates here for robustness, you may change these
+    backtest_start_date = st.sidebar.date_input("Backtest Start Date", pd.to_datetime('2024-01-01').date()) 
     backtest_end_date = st.sidebar.date_input("Backtest End Date", pd.to_datetime('2024-03-31').date())
     training_window_days = st.sidebar.number_input("Rolling Training Window (business days)", min_value=120, max_value=500, value=252, step=1)
     
@@ -446,7 +442,6 @@ def main():
         st.header("📊 Backtest Results Analysis")
         results_df = st.session_state.results_df.copy()
         
-        # Filter out rows where the actual curve is all NaN
         mask = results_df['Actual_Curve'].apply(lambda x: isinstance(x, float) or np.isnan(x).all())
         results_df = results_df[~mask].copy()
 
@@ -471,7 +466,7 @@ def main():
                 'MAE': np.nanmean(np.abs(pred - actual))
             })
         
-        # Errors are calculated on the rate-space curve (magnitudes are identical in price space)
+        # Errors are calculated on the rate-space curve 
         results_df[['Daily_RMSE_Rates', 'Daily_MAE_Rates']] = results_df.apply(lambda row: calculate_errors(row, std_cols_f), axis=1)
         results_df[['Daily_RMSE_Spreads', 'Daily_MAE_Spreads']] = results_df.apply(lambda row: calculate_errors(row, spread_cols_f), axis=1)
         results_df[['Daily_RMSE_Flies', 'Daily_MAE_Flies']] = results_df.apply(lambda row: calculate_errors(row, fly_cols_f), axis=1)
@@ -636,3 +631,9 @@ def main():
 
     else:
         st.info("Upload files, configure the backtest parameters, and click **Run Backtest**.")
+
+# --------------------------
+# FIX: Call the main function to run the Streamlit UI
+# --------------------------
+if __name__ == '__main__':
+    main()
