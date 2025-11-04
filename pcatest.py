@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# SOFR Contract PCA — Backtesting Engine (sofr_contract_pca_backtest_v5.py)
+# SOFR Contract PCA — Backtesting Engine (sofr_contract_pca_backtest_v6.py)
 #
 # This script performs a walk-forward validation (backtest) of the PCA-based
 # yield curve forecasting models for SOFR instruments using contract data.
@@ -27,7 +27,7 @@ sns.set_style("whitegrid")
 plt.rcParams["figure.dpi"] = 120
 
 # ---------------------------------------------------------------------------------
-# CORE DATA PROCESSING FUNCTIONS (Adapted for Contracts)
+# CORE DATA PROCESSING FUNCTIONS
 # ---------------------------------------------------------------------------------
 
 def safe_to_datetime(s):
@@ -69,6 +69,7 @@ def calculate_ttm(valuation_ts, expiry_ts, holidays_np, year_basis):
 def build_std_grid_by_rule(rule_name, max_year):
     """
     Defines the standard set of TTM tenors for the curve based on a selection rule.
+    FIXED: Uses a consistent 0.25Y step for the short-mid curve to avoid interpolation gaps.
     """
     max_year = float(max_year)
     if rule_name == "US Standard":
@@ -78,20 +79,17 @@ def build_std_grid_by_rule(rule_name, max_year):
         std_grid_cols = [f"{int(t)}Y" for t in std_grid_tenors]
         
     elif rule_name == "0.25Y Increments (DI-style)":
-        # Fine grid: 0.25Y, 0.5Y, 0.75Y, 1.0Y, 1.25Y, ..., 2.0Y, ..., 5.0Y, ...
+        # Fine grid: 0.25Y increments up to 5 years (dense enough for contracts)
+        tenors_fine = np.round(np.arange(0.25, 5.0 + 0.001, 0.25), 2)
+        # Coarser grid for the long end
+        tenors_long = np.round(np.arange(6.0, 30.0 + 0.001, 1.0), 2)
         
-        # Fine grid for the short end
-        tenors_fine = np.round(np.arange(0.25, 3.0 + 0.001, 0.25), 2)
-        # Medium grid for mid-curve
-        tenors_medium = np.round(np.arange(3.5, 7.0 + 0.001, 0.5), 2)
-        # Coarse grid for long end
-        tenors_long = np.round(np.arange(8.0, 30.0 + 0.001, 1.0), 2)
-        
-        tenors = np.unique(np.concatenate([tenors_fine, tenors_medium, tenors_long]))
+        # Combine and filter by user-defined maximum tenor
+        tenors = np.unique(np.concatenate([tenors_fine, tenors_long]))
         tenors = tenors[tenors <= max_year]
 
         std_grid_tenors = tenors
-        # Clean labels: 0.25Y, 1.00Y (avoiding .25Y, 1Y mixed styles)
+        # Clean labels: 0.25Y, 1.00Y
         std_grid_cols = [f"{t:.2f}Y" for t in std_grid_tenors]
         
     else:
@@ -102,7 +100,6 @@ def build_std_grid_by_rule(rule_name, max_year):
 def row_to_std_grid(dt, row_series, available_contracts, expiry_df, std_arr, holidays_np, year_basis, rate_unit, interp_method):
     """
     Interpolates a single day's raw contract rates to the standard TTM grid.
-    TTM is calculated using the contract's expiry date.
     """
     ttm_list, rate_list = [], []
     for col in available_contracts:
@@ -127,6 +124,8 @@ def row_to_std_grid(dt, row_series, available_contracts, expiry_df, std_arr, hol
         try:
             min_ttm = min(ttm_list)
             max_ttm = max(ttm_list)
+            
+            # Select only the standard grid points that fall within the contract TTM range
             target_ttm = np.array([t for t in std_arr if t >= min_ttm and t <= max_ttm])
             
             if len(target_ttm) == 0:
@@ -292,7 +291,7 @@ def main():
     if 'selected_date_index' not in st.session_state: st.session_state.selected_date_index = 0
     if 'selected_spread_date_index' not in st.session_state: st.session_state.selected_spread_date_index = 0
 
-    # --- CALLBACK DEFINITIONS (FIXED NAVIGATION LOGIC) ---
+    # --- CALLBACK DEFINITIONS ---
     def next_date(key):
         if key == 'rates' and st.session_state.selected_date_index < len(st.session_state.unique_dates) - 1:
             st.session_state.selected_date_index += 1
@@ -308,13 +307,13 @@ def main():
     def sync_rates_index():
         """Updates the rates index in session state when the selectbox is manually changed."""
         unique_dates = st.session_state.unique_dates
-        if unique_dates is not None and st.session_state.rates_date_select in unique_dates:
+        if unique_dates.size > 0 and st.session_state.rates_date_select in unique_dates:
             st.session_state.selected_date_index = unique_dates.tolist().index(st.session_state.rates_date_select)
 
     def sync_spreads_index():
         """Updates the spreads index in session state when the selectbox is manually changed."""
         unique_dates = st.session_state.unique_dates
-        if unique_dates is not None and st.session_state.spreads_date_select in unique_dates:
+        if unique_dates.size > 0 and st.session_state.spreads_date_select in unique_dates:
             st.session_state.selected_spread_date_index = unique_dates.tolist().index(st.session_state.spreads_date_select)
             
     # ----------------------------
@@ -527,8 +526,8 @@ def main():
             "Select a date to inspect",
             options=unique_dates,
             index=st.session_state.selected_date_index,
-            key="rates_date_select",  # Added key
-            on_change=sync_rates_index # Added sync handler
+            key="rates_date_select",  # Key for manual selection
+            on_change=sync_rates_index # Sync handler
         )
         
         if selected_date:
@@ -611,8 +610,8 @@ def main():
             "Select a date to inspect spreads/flies",
             options=unique_dates,
             index=st.session_state.selected_spread_date_index,
-            key="spreads_date_select", # Added key
-            on_change=sync_spreads_index # Added sync handler
+            key="spreads_date_select", # Key for manual selection
+            on_change=sync_spreads_index # Sync handler
         )
         
         if selected_spread_date:
