@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-# SOFR Contract PCA — Backtesting Engine (sofr_contract_pca_backtest.py)
+# SOFR Contract PCA — Backtesting Engine (sofr_contract_pca_backtest_custom.py)
 #
 # This script performs a walk-forward validation (backtest) of the PCA-based
-# yield curve forecasting models for SOFR/Treasury instruments priced by contract
-# (e.g., SOFR Futures, or Swap contracts where TTM is calculated by contract expiry).
+# yield curve forecasting models for SOFR instruments using contract data.
 # ---------------------------------------------------------------------------------
 
 import io
@@ -17,7 +16,6 @@ from sklearn.preprocessing import StandardScaler
 from scipy.interpolate import interp1d
 from statsmodels.tsa.api import VAR
 from statsmodels.tsa.arima.model import ARIMA
-from sklearn.metrics import mean_squared_error, mean_absolute_error
 import warnings
 import datetime
 from datetime import timedelta
@@ -60,29 +58,41 @@ def np_busdays_exclusive(start_dt, end_dt, holidays_np):
     s = np.datetime64(pd.Timestamp(start_dt).date()) + np.timedelta64(1, "D")
     e = np.datetime64(pd.Timestamp(end_dt).date())
     if e < s: return 0
-    # Note: US conventions usually use a 360 or 365 basis, not business days, but retaining bus-day count for fidelity to original code's TTM methodology.
     return int(np.busday_count(s, e, weekmask="1111100", holidays=holidays_np))
 
 def calculate_ttm(valuation_ts, expiry_ts, holidays_np, year_basis):
-    """Calculates Time-To-Maturity (TTM) in years based on business days or a fixed basis."""
-    # Using bus-day count (as per original file) but year_basis is likely 252 for futures/swaps
+    """Calculates Time-To-Maturity (TTM) in years based on business days and year basis."""
     bd = np_busdays_exclusive(valuation_ts, expiry_ts, holidays_np)
     return np.nan if bd <= 0 else bd / float(year_basis)
 
-def build_std_grid_by_rule(max_year=30.0):
+def build_std_grid_by_rule(rule_name="0.25Y Increments (DI-style)", max_year=10.0):
     """
-    Defines the standard set of TTM tenors for the US SOFR/Treasury curve.
-    Points: 1Y, 2Y, 3Y, 5Y, 7Y, 10Y, 30Y.
+    Defines the standard set of TTM tenors for the curve based on a selection rule.
+    Returns: list of TTM floats (std_arr), list of TTM string labels (std_cols).
     """
-    # Standard US tenors in years
-    tenors = np.array([1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 30.0])
+    max_year = float(max_year)
+    if rule_name == "US Standard":
+        # Standard US tenors: 1Y, 2Y, 3Y, 5Y, 7Y, 10Y, 30Y
+        tenors = np.array([1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 30.0])
+        std_grid_tenors = tenors[tenors <= max_year]
+        std_grid_cols = [f"{int(t)}Y" for t in std_grid_tenors]
+        
+    elif rule_name == "0.25Y Increments (DI-style)":
+        # Fine grid: 0.25Y, 0.5Y, 0.75Y, 1.0Y, 1.25Y...
+        tenors_fine = np.round(np.arange(0.25, 3.0 + 0.001, 0.25), 2)
+        tenors_medium = np.round(np.arange(3.5, 5.0 + 0.001, 0.5), 2)
+        tenors_long = np.round(np.arange(6.0, 30.0 + 0.001, 1.0), 2)
+        
+        tenors = np.unique(np.concatenate([tenors_fine, tenors_medium, tenors_long]))
+        tenors = tenors[tenors <= max_year]
+
+        std_grid_tenors = tenors
+        std_grid_cols = [f"{t:.2f}Y" for t in std_grid_tenors]
+        
+    else:
+        # Fallback to the fine grid
+        return build_std_grid_by_rule("0.25Y Increments (DI-style)", max_year)
     
-    # Filter tenors to the chosen max_year
-    std_grid_tenors = tenors[tenors <= max_year]
-    
-    # Create column names (e.g., 1.0 -> '1Y')
-    std_grid_cols = [f"{int(t)}Y" for t in std_grid_tenors]
-            
     return list(std_grid_tenors), std_grid_cols
 
 def row_to_std_grid(dt, row_series, available_contracts, expiry_df, std_arr, holidays_np, year_basis, rate_unit, interp_method):
@@ -96,10 +106,8 @@ def row_to_std_grid(dt, row_series, available_contracts, expiry_df, std_arr, hol
         if mat_up not in expiry_df.index: continue
         exp = expiry_df.loc[mat_up, "DATE"]
         
-        # Check if the contract is still live
         if pd.isna(exp) or pd.Timestamp(exp).date() < dt.date(): continue
         
-        # Calculate TTM (using business day count from original logic)
         t = calculate_ttm(dt, exp, holidays_np, year_basis)
         if np.isnan(t) or t <= 0: continue
         
@@ -113,9 +121,9 @@ def row_to_std_grid(dt, row_series, available_contracts, expiry_df, std_arr, hol
     # Check if we have enough distinct points for interpolation
     if len(ttm_list) > 1 and len(set(np.round(ttm_list, 12))) > 1:
         try:
-            # Determine which standard points are covered by the raw data
             min_ttm = min(ttm_list)
             max_ttm = max(ttm_list)
+            # Only target TTM points covered by the input data range
             target_ttm = np.array([t for t in std_arr if t >= min_ttm and t <= max_ttm])
             
             if len(target_ttm) == 0:
@@ -124,7 +132,7 @@ def row_to_std_grid(dt, row_series, available_contracts, expiry_df, std_arr, hol
             order = np.argsort(ttm_list)
             f = interp1d(np.array(ttm_list)[order], np.array(rate_list)[order], 
                          kind=interp_method, bounds_error=False, 
-                         fill_value=(rate_list[order[0]], rate_list[order[-1]]), # Linear extrapolation
+                         fill_value=(rate_list[order[0]], rate_list[order[-1]]),
                          assume_sorted=True)
             
             interpolated_rates = f(target_ttm)
@@ -133,7 +141,10 @@ def row_to_std_grid(dt, row_series, available_contracts, expiry_df, std_arr, hol
             result_rates = np.full(len(std_arr), np.nan, dtype=float)
             for i, t in enumerate(std_arr):
                 if t in target_ttm:
-                    result_rates[i] = interpolated_rates[np.where(target_ttm == t)[0][0]]
+                    # Use a small tolerance for float comparison
+                    match_index = np.where(np.isclose(target_ttm, t))[0]
+                    if match_index.size > 0:
+                        result_rates[i] = interpolated_rates[match_index[0]]
             return result_rates
 
         except Exception: 
@@ -172,7 +183,6 @@ def build_pca_matrix(yields_df_train, expiry_df, std_arr, std_cols, holidays_np,
     pca_df_flies = pd.DataFrame(index=pca_df_zeros.index, columns=fly_cols, dtype=float)
     for i in range(1, len(std_cols) - 1):
         col_name = f"{std_cols[i+1]}x{std_cols[i]}x{std_cols[i-1]}"
-        # Standard butterfly: (Long - Mid) - (Mid - Short)
         spread_long = pca_df_zeros[std_cols[i+1]] - pca_df_zeros[std_cols[i]]
         spread_short = pca_df_zeros[std_cols[i]] - pca_df_zeros[std_cols[i-1]]
         pca_df_flies[col_name] = spread_long - spread_short
@@ -223,12 +233,12 @@ def forecast_pcs_arima(PCs_df):
 
 def main():
     st.title("🏛️ SOFR Contract PCA Backtesting Engine")
-    st.markdown("This tool performs a walk-forward backtest of PCA-based curve forecasting models for **contract-based** yields, analyzing **Outright Rates, Spreads, and Flies**.")
+    st.markdown("This tool performs a walk-forward backtest of PCA-based curve forecasting models for **contract-based** yields.")
     st.markdown("---")
 
     # --- Sidebar Inputs ---
     st.sidebar.header("1) Upload Data")
-    st.sidebar.info("Requires three files to calculate TTM accurately.")
+    st.sidebar.info("Requires Yield data, Expiry Map (contract tickers), and Holidays.")
     yield_file = st.sidebar.file_uploader("Yield data CSV (Daily Rates by Contract Ticker)", type="csv")
     expiry_file = st.sidebar.file_uploader("Expiry mapping CSV (Contract Ticker -> Date)", type="csv")
     holiday_file = st.sidebar.file_uploader("Holiday dates CSV (US Federal Holidays)", type="csv")
@@ -244,6 +254,15 @@ def main():
         var_lags = st.sidebar.number_input("VAR model lags", min_value=1, max_value=5, value=1, step=1)
 
     st.sidebar.markdown("---")
+    st.sidebar.subheader("4) Curve Definition & Grid")
+    grid_style_sel = st.sidebar.selectbox("Standard Tenor Grid Style", ["0.25Y Increments (DI-style)", "US Standard"])
+    
+    # Max tenor for PCA (must be the longest tenor for accurate modeling)
+    max_tenor_pca = st.sidebar.slider("Maximum Tenor for PCA Model (Years)", min_value=5, max_value=30, value=10, step=1)
+    
+    # Max tenor for Plotting (user requested up to 5 years, so default to 5)
+    max_tenor_plot = st.sidebar.slider("Maximum Tenor for Graphs (Years)", min_value=0.5, max_value=float(max_tenor_pca), value=5.0, step=0.5)
+
     st.sidebar.subheader("Data Conventions")
     rate_unit = st.sidebar.selectbox("Input rate unit", ["Percent (e.g. 5.45)", "Decimal (e.g. 0.0545)", "Basis points (e.g. 545)"])
     year_basis = int(st.sidebar.selectbox("Year Basis for TTM (e.g. 252 or 365)", [252, 365], index=0))
@@ -347,8 +366,8 @@ def main():
         backtest_range = pd.bdate_range(start=backtest_start_date, end=backtest_end_date)
         all_available_dates = yields_df.index
 
-        # Setup SOFR grid
-        std_arr, std_cols = build_std_grid_by_rule(max_year=30.0)
+        # Setup custom grid for PCA model training
+        std_arr, std_cols = build_std_grid_by_rule(rule_name=grid_style_sel, max_year=float(max_tenor_pca))
         spread_cols = [f"{std_cols[i]}-{std_cols[i-1]}" for i in range(1, len(std_cols))]
         fly_cols = [f"{std_cols[i+1]}x{std_cols[i]}x{std_cols[i-1]}" for i in range(1, len(std_cols) - 1)]
         all_cols_full = std_cols + spread_cols + fly_cols
@@ -395,7 +414,6 @@ def main():
                 else: # ARIMA
                     pcs_next = forecast_pcs_arima(PCs_df)
                 
-                # Forecasting the next level via Delta approach
                 last_pcs = PCs_df.iloc[-1].values.reshape(1, -1)
                 delta_pcs = pcs_next - last_pcs
                 delta_curve = pca.inverse_transform(delta_pcs)
@@ -431,7 +449,7 @@ def main():
 
 
     # --------------------------
-    # RESULTS ANALYSIS (Same plotting and analysis logic as original file)
+    # RESULTS ANALYSIS
     # --------------------------
     if st.session_state.results_df is not None:
         results_df = st.session_state.results_df.copy()
@@ -478,7 +496,18 @@ def main():
 
         unique_dates = results_df['Date'].dt.date.unique()
         st.session_state.unique_dates = unique_dates
-        std_arr, _ = build_std_grid_by_rule(max_year=30.0)
+        std_arr, std_cols_full = build_std_grid_by_rule(rule_name=grid_style_sel, max_year=float(max_tenor_pca))
+
+        # Filter for Plotting Range
+        max_plot_index = next((i for i, t in enumerate(std_arr) if t > max_tenor_plot), len(std_arr))
+        plot_std_arr = std_arr[:max_plot_index]
+        plot_std_cols = std_cols_full[:max_plot_index]
+        
+        # Determine labels based on grid style
+        if grid_style_sel == "0.25Y Increments (DI-style)":
+            plot_labels = [f"{t:.2f}Y" for t in plot_std_arr]
+        else:
+            plot_labels = [f"{int(t)}Y" for t in plot_std_arr]
         
         col_p, col_d, col_n = st.columns([1, 4, 1])
         col_p.button("◀ Previous", key="rates_prev", on_click=prev_date, args=('rates',))
@@ -493,19 +522,20 @@ def main():
         if selected_date:
             plot_data = results_df[results_df['Date'].dt.date == selected_date]
             if not plot_data.empty:
-                indices = [all_cols.index(c) for c in std_cols]
+                # Use the filtered columns/indices for plotting
+                indices = [all_cols.index(c) for c in plot_std_cols]
                 actual_c = plot_data['Actual_Curve'].iloc[0][indices]
                 pred_c = plot_data['Predicted_Curve'].iloc[0][indices]
 
                 fig, ax = plt.subplots(figsize=(14, 7))
-                ax.plot(std_arr, actual_c, label=f"Actual on {selected_date}", color='royalblue', marker='o', linestyle='-')
-                ax.plot(std_arr, pred_c, label=f"Predicted for {selected_date}", color='darkorange', marker='x', linestyle='--')
+                ax.plot(plot_std_arr, actual_c, label=f"Actual on {selected_date}", color='royalblue', marker='o', linestyle='-')
+                ax.plot(plot_std_arr, pred_c, label=f"Predicted for {selected_date}", color='darkorange', marker='x', linestyle='--')
                 
-                ax.set_title(f"Yield Curve Forecast vs. Actual for {selected_date}", fontsize=16)
+                ax.set_title(f"Yield Curve Forecast vs. Actual for {selected_date} (Plotting up to {max_tenor_plot}Y)", fontsize=16)
                 ax.set_xlabel("Standardized Maturity (Years)")
                 ax.set_ylabel(f"Rate ({rate_unit})")
-                ax.set_xticks(std_arr)
-                ax.set_xticklabels([f"{int(m)}Y" for m in std_arr], rotation=45, ha="right")
+                ax.set_xticks(plot_std_arr)
+                ax.set_xticklabels(plot_labels, rotation=45, ha="right")
                 ax.legend()
                 ax.grid(True, which='both', linestyle='--', linewidth=0.5)
                 plt.tight_layout()
@@ -537,31 +567,38 @@ def main():
         if selected_spread_date:
             plot_data = results_df[results_df['Date'].dt.date == selected_spread_date]
             if not plot_data.empty:
-                spread_indices = [all_cols.index(c) for c in spread_cols]
+                
+                # Filter Spread and Fly columns for Plotting Range
+                plot_spread_cols = [c for c in spread_cols if c.split('-')[1] in plot_std_cols]
+                plot_fly_cols = [c for c in fly_cols if c.split('x')[2] in plot_std_cols]
+
+                # Indices for Spreads
+                spread_indices = [all_cols.index(c) for c in plot_spread_cols]
                 actual_spreads = plot_data['Actual_Curve'].iloc[0][spread_indices]
                 pred_spreads = plot_data['Predicted_Curve'].iloc[0][spread_indices]
                 
-                fly_indices = [all_cols.index(c) for c in fly_cols]
+                # Indices for Flies
+                fly_indices = [all_cols.index(c) for c in plot_fly_cols]
                 actual_flies = plot_data['Actual_Curve'].iloc[0][fly_indices]
                 pred_flies = plot_data['Predicted_Curve'].iloc[0][fly_indices]
 
                 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
                 
                 # Spreads Plot
-                ax1.plot(spread_cols, actual_spreads, marker='o', linestyle='-', color='royalblue', label=f"Actual Spreads")
-                ax1.plot(spread_cols, pred_spreads, marker='x', linestyle='--', color='darkorange', label="Predicted Spreads")
-                ax1.set_title(f"Spread Forecast vs. Actual for {selected_spread_date}")
+                ax1.plot(plot_spread_cols, actual_spreads, marker='o', linestyle='-', color='royalblue', label=f"Actual Spreads")
+                ax1.plot(plot_spread_cols, pred_spreads, marker='x', linestyle='--', color='darkorange', label="Predicted Spreads")
+                ax1.set_title(f"Spread Forecast vs. Actual for {selected_spread_date} (Short-End)")
                 ax1.set_ylabel("Spread (%)")
-                ax1.set_xticklabels(spread_cols, rotation=45, ha="right")
+                ax1.set_xticklabels(plot_spread_cols, rotation=45, ha="right")
                 ax1.grid(True, which='both', linestyle='--', linewidth=0.5)
                 ax1.legend()
                 
                 # Flies Plot
-                ax2.plot(fly_cols, actual_flies, marker='o', linestyle='-', color='royalblue', label=f"Actual Flies")
-                ax2.plot(fly_cols, pred_flies, marker='x', linestyle='--', color='darkorange', label="Predicted Flies")
-                ax2.set_title(f"Butterfly Forecast vs. Actual for {selected_spread_date}")
+                ax2.plot(plot_fly_cols, actual_flies, marker='o', linestyle='-', color='royalblue', label=f"Actual Flies")
+                ax2.plot(plot_fly_cols, pred_flies, marker='x', linestyle='--', color='darkorange', label="Predicted Flies")
+                ax2.set_title(f"Butterfly Forecast vs. Actual for {selected_spread_date} (Short-End)")
                 ax2.set_ylabel("Fly (%)")
-                ax2.set_xticklabels(fly_cols, rotation=45, ha="right")
+                ax2.set_xticklabels(plot_fly_cols, rotation=45, ha="right")
                 ax2.grid(True, which='both', linestyle='--', linewidth=0.5)
                 ax2.legend()
                 
@@ -569,7 +606,7 @@ def main():
                 st.pyplot(fig)
 
         st.markdown("---")
-        st.subheader("Raw Results Dataframe")
+        st.subheader("Raw Results Dataframe (Full PCA Tenors)")
         st.write("Contains the raw predicted and actual outright, spread, and fly vectors for each day of the backtest.")
 
         raw_df = pd.DataFrame(results_df['Date']).set_index('Date')
