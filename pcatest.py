@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# SOFR Contract PCA — Backtesting Engine (sofr_contract_pca_backtest_v2.py)
+# SOFR Contract PCA — Backtesting Engine (sofr_contract_pca_backtest_v3.py)
 #
 # This script performs a walk-forward validation (backtest) of the PCA-based
 # yield curve forecasting models for SOFR instruments using contract data.
@@ -99,7 +99,6 @@ def build_std_grid_by_rule(rule_name, max_year):
     
     return list(std_grid_tenors), std_grid_cols
 
-# ... (row_to_std_grid and build_pca_matrix remain the same as the last version) ...
 def row_to_std_grid(dt, row_series, available_contracts, expiry_df, std_arr, holidays_np, year_basis, rate_unit, interp_method):
     """
     Interpolates a single day's raw contract rates to the standard TTM grid.
@@ -204,7 +203,6 @@ def build_pca_matrix(yields_df_train, expiry_df, std_arr, std_cols, holidays_np,
 
     return pd.DataFrame(pca_vals, index=pca_df_combined.index, columns=pca_df_combined.columns)
 
-# ... (PCA and Forecasting Functions remain the same) ...
 def forecast_pcs_var(PCs_df, lags=1):
     """Forecasts the next Principal Component vector using VAR."""
     if len(PCs_df) < lags + 5: return PCs_df.iloc[-1:].values
@@ -223,11 +221,6 @@ def forecast_pcs_arima(PCs_df):
         except Exception:
              forecasts.append(series.iloc[-1])
     return np.array(forecasts).reshape(1, -1)
-
-
-# ---------------------------------------------------------------------------------
-# STREAMLIT UI AND EXECUTION
-# ---------------------------------------------------------------------------------
 
 @st.cache_data(show_spinner="Loading and sanitizing data...")
 def load_all_data(yield_file, expiry_file, holiday_file):
@@ -284,7 +277,7 @@ def main():
     st.sidebar.subheader("Data Conventions")
     rate_unit = st.sidebar.selectbox("Input rate unit", ["Percent (e.g. 5.45)", "Decimal (e.g. 0.0545)", "Basis points (e.g. 545)"])
     year_basis = int(st.sidebar.selectbox("Year Basis for TTM (e.g. 252 or 365)", [252, 365], index=0))
-    interp_method = "linear" # Hardcoded
+    interp_method = "linear" 
 
     # --- 3) Curve Definition & Grid (Always visible) ---
     st.sidebar.header("3) Curve Definition & Grid")
@@ -292,12 +285,36 @@ def main():
     max_tenor_pca = st.sidebar.slider("Maximum Tenor for PCA Model (Years)", min_value=5, max_value=30, value=10, step=1)
     max_tenor_plot = st.sidebar.slider("Maximum Tenor for Graphs (Years)", min_value=0.5, max_value=float(max_tenor_pca), value=5.0, step=0.5)
 
+    # --- Initialize session state for UI state and results ---
+    if 'results_df' not in st.session_state: st.session_state.results_df = None
+    if 'unique_dates' not in st.session_state: st.session_state.unique_dates = []
+    if 'selected_date_index' not in st.session_state: st.session_state.selected_date_index = 0
+    if 'selected_spread_date_index' not in st.session_state: st.session_state.selected_spread_date_index = 0
+
+    # --- CALLBACK DEFINITIONS (FIXED NameError) ---
+    def next_date(key):
+        if key == 'rates' and st.session_state.selected_date_index < len(st.session_state.unique_dates) - 1:
+            st.session_state.selected_date_index += 1
+        elif key == 'spreads' and st.session_state.selected_spread_date_index < len(st.session_state.unique_dates) - 1:
+            st.session_state.selected_spread_date_index += 1
+
+    def prev_date(key):
+        if key == 'rates' and st.session_state.selected_date_index > 0:
+            st.session_state.selected_date_index -= 1
+        elif key == 'spreads' and st.session_state.selected_spread_date_index > 0:
+            st.session_state.selected_spread_date_index -= 1
+    # -----------------------------------------------
+
     # --- Load Data and Determine Date Range (Dynamic) ---
     yields_df, expiry_df, holidays_np = None, None, None
     backtest_start_date, backtest_end_date = None, None
     
     if all([yield_file, expiry_file]):
-        yields_df, expiry_df, holidays_np = load_all_data(yield_file, expiry_file, holiday_file)
+        try:
+            yields_df, expiry_df, holidays_np = load_all_data(yield_file, expiry_file, holiday_file)
+        except Exception as e:
+            st.error(f"Error loading or parsing data: {e}")
+            st.stop()
         
         if yields_df is not None and not yields_df.empty:
             st.sidebar.header("4) Select Backtest Period")
@@ -305,18 +322,14 @@ def main():
             max_date = yields_df.index.max().date()
             min_data_start = yields_df.index.min().date()
             
-            # Calculate the earliest valid start date: min_data_start + lookback margin
             min_lookback_dt = yields_df.index.min() + pd.DateOffset(days=training_window_days * 1.5)
             min_valid_start_date = min_lookback_dt.date()
             
-            # Ensure the minimum date is within the overall data range
             min_valid_start_date = max(min_valid_start_date, min_data_start)
             
             if min_valid_start_date >= max_date:
                 st.sidebar.error("Data period is too short for the selected training window.")
-                # We can't proceed meaningfully, but let the user try.
             else:
-                # Default start date is the min valid start date
                 default_start_date = min_valid_start_date
                 
                 date_range = st.sidebar.date_input(
@@ -329,6 +342,9 @@ def main():
                 if len(date_range) == 2:
                     backtest_start_date = pd.to_datetime(date_range[0])
                     backtest_end_date = pd.to_datetime(date_range[1])
+                elif len(date_range) == 1:
+                    st.sidebar.warning("Please select an end date.")
+                
 
     st.sidebar.markdown("---")
     run_backtest = st.sidebar.button("Run Backtest", type="primary")
@@ -340,10 +356,9 @@ def main():
             st.stop()
         
         if backtest_start_date is None or backtest_end_date is None or backtest_start_date >= backtest_end_date:
-            st.error("Please select a valid, non-empty Backtest Period.")
+            st.error("Please select a valid, non-empty Backtest Period in Section 4.")
             st.stop()
             
-        # Final check on training window viability
         min_required_date = yields_df.index.min() + pd.DateOffset(days=training_window_days * 1.5)
         if backtest_start_date < min_required_date:
             st.warning(f"Starting backtest on {backtest_start_date.date()} may result in a partial or invalid training window (less than {training_window_days} business days) for the initial few steps.")
@@ -434,6 +449,7 @@ def main():
             st.session_state.results_df = pd.DataFrame(results)
         else:
             st.error("Backtest failed to generate results. Check data range and window size.")
+            st.session_state.results_df = None
 
 
     # --------------------------
@@ -442,7 +458,6 @@ def main():
     if 'results_df' in st.session_state and st.session_state.results_df is not None:
         results_df = st.session_state.results_df.copy()
         
-        # ... (Error calculation remains the same) ...
         mask = results_df['Actual_Curve'].apply(lambda x: isinstance(x, float) or np.isnan(x).all())
         results_df = results_df[~mask].copy()
 
@@ -498,8 +513,8 @@ def main():
             plot_labels = [f"{int(t)}Y" for t in plot_std_arr]
         
         col_p, col_d, col_n = st.columns([1, 4, 1])
-        if 'selected_date_index' not in st.session_state: st.session_state.selected_date_index = 0
         
+        # FIXED: Callbacks are now correctly defined in main()
         col_p.button("◀ Previous", key="rates_prev", on_click=prev_date, args=('rates',))
         col_n.button("Next ▶", key="rates_next", on_click=next_date, args=('rates',))
         
@@ -544,8 +559,8 @@ def main():
         st.subheader("Daily Visualization (Spreads and Flies)")
 
         col_p, col_d, col_n = st.columns([1, 4, 1])
-        if 'selected_spread_date_index' not in st.session_state: st.session_state.selected_spread_date_index = 0
         
+        # FIXED: Callbacks are now correctly defined in main()
         col_p.button("◀ Previous", key="spreads_prev", on_click=prev_date, args=('spreads',))
         col_n.button("Next ▶", key="spreads_next", on_click=next_date, args=('spreads',))
         
@@ -560,7 +575,6 @@ def main():
             if not plot_data.empty:
                 
                 # Filter Spread and Fly columns for Plotting Range
-                # Only include spreads/flies where ALL component tenors are within the plot range
                 plot_std_cols_set = set(plot_std_cols)
                 plot_spread_cols = [c for c in spread_cols if all(t in plot_std_cols_set for t in c.split('-'))]
                 plot_fly_cols = [c for c in fly_cols if all(t in plot_std_cols_set for t in c.split('x'))]
