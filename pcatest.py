@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-# SOFR/Treasury Curve PCA Backtesting Engine (sofr_pca_backtest.py)
+# SOFR Contract PCA — Backtesting Engine (sofr_contract_pca_backtest.py)
 #
 # This script performs a walk-forward validation (backtest) of the PCA-based
-# yield curve forecasting models for the US SOFR/Treasury curve.
-#
-# It calculates and backtests: Outright Rates, Spreads, and Butterflies (Flies).
+# yield curve forecasting models for SOFR/Treasury instruments priced by contract
+# (e.g., SOFR Futures, or Swap contracts where TTM is calculated by contract expiry).
 # ---------------------------------------------------------------------------------
 
 import io
@@ -25,12 +24,12 @@ from datetime import timedelta
 
 # --- Setup ---
 warnings.filterwarnings("ignore")
-st.set_page_config(layout="wide", page_title="SOFR Curve PCA Backtesting Engine")
+st.set_page_config(layout="wide", page_title="SOFR Contract PCA Backtesting Engine")
 sns.set_style("whitegrid")
 plt.rcParams["figure.dpi"] = 120
 
 # ---------------------------------------------------------------------------------
-# CORE DATA PROCESSING FUNCTIONS (Adapted for Fixed Tenors)
+# CORE DATA PROCESSING FUNCTIONS (Adapted for Contracts)
 # ---------------------------------------------------------------------------------
 
 def safe_to_datetime(s):
@@ -43,7 +42,7 @@ def safe_to_datetime(s):
     return pd.to_datetime(s, errors='coerce')
 
 def normalize_rate_input(val, unit):
-    """Converts rate input (e.g., 13.45%) to decimal fraction (e.g., 0.1345)."""
+    """Converts rate input (e.g., 5.45%) to decimal fraction (e.g., 0.0545)."""
     if pd.isna(val): return np.nan
     v = float(val)
     if "Percent" in unit: return v / 100.0
@@ -51,27 +50,31 @@ def normalize_rate_input(val, unit):
     return v
 
 def denormalize_to_percent(frac):
-    """Converts decimal fraction to percentage (e.g., 0.1345 to 13.45)."""
+    """Converts decimal fraction to percentage (e.g., 0.0545 to 5.45)."""
     if pd.isna(frac): return np.nan
     return 100.0 * float(frac)
 
-def parse_tenor_to_ttm(col_name):
-    """Converts a tenor string (e.g., '3M', '5Y') to TTM in years (0.25, 5.0)."""
-    col_upper = col_name.upper().strip()
-    if 'M' in col_upper:
-        try: return float(col_upper.replace('M', '')) / 12.0 # Months to Years
-        except ValueError: return np.nan
-    elif 'Y' in col_upper:
-        try: return float(col_upper.replace('Y', '')) # Years
-        except ValueError: return np.nan
-    return np.nan
+def np_busdays_exclusive(start_dt, end_dt, holidays_np):
+    """Calculates business days between two dates (exclusive of start, inclusive of end)."""
+    if pd.isna(start_dt) or pd.isna(end_dt): return 0
+    s = np.datetime64(pd.Timestamp(start_dt).date()) + np.timedelta64(1, "D")
+    e = np.datetime64(pd.Timestamp(end_dt).date())
+    if e < s: return 0
+    # Note: US conventions usually use a 360 or 365 basis, not business days, but retaining bus-day count for fidelity to original code's TTM methodology.
+    return int(np.busday_count(s, e, weekmask="1111100", holidays=holidays_np))
+
+def calculate_ttm(valuation_ts, expiry_ts, holidays_np, year_basis):
+    """Calculates Time-To-Maturity (TTM) in years based on business days or a fixed basis."""
+    # Using bus-day count (as per original file) but year_basis is likely 252 for futures/swaps
+    bd = np_busdays_exclusive(valuation_ts, expiry_ts, holidays_np)
+    return np.nan if bd <= 0 else bd / float(year_basis)
 
 def build_std_grid_by_rule(max_year=30.0):
     """
     Defines the standard set of TTM tenors for the US SOFR/Treasury curve.
-    Uses standard points: 1Y, 2Y, 3Y, 5Y, 7Y, 10Y, 30Y.
+    Points: 1Y, 2Y, 3Y, 5Y, 7Y, 10Y, 30Y.
     """
-    # Define standard US tenors in years
+    # Standard US tenors in years
     tenors = np.array([1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 30.0])
     
     # Filter tenors to the chosen max_year
@@ -82,37 +85,46 @@ def build_std_grid_by_rule(max_year=30.0):
             
     return list(std_grid_tenors), std_grid_cols
 
-
-def row_to_std_grid(row_series, available_tenor_cols, std_arr, rate_unit, interp_method):
-    """Interpolates a single day's fixed-tenor rates to the standard TTM grid."""
+def row_to_std_grid(dt, row_series, available_contracts, expiry_df, std_arr, holidays_np, year_basis, rate_unit, interp_method):
+    """
+    Interpolates a single day's raw contract rates to the standard TTM grid.
+    TTM is calculated using the contract's expiry date.
+    """
     ttm_list, rate_list = [], []
-    
-    for col in available_tenor_cols:
-        t = parse_tenor_to_ttm(col)
-        raw_val = row_series.get(col, np.nan)
+    for col in available_contracts:
+        mat_up = str(col).strip().upper()
+        if mat_up not in expiry_df.index: continue
+        exp = expiry_df.loc[mat_up, "DATE"]
         
-        if not np.isnan(t) and t > 0 and pd.notna(raw_val):
-            rate_frac = normalize_rate_input(raw_val, rate_unit)
-            rate_list.append(denormalize_to_percent(rate_frac))
-            ttm_list.append(t)
-
+        # Check if the contract is still live
+        if pd.isna(exp) or pd.Timestamp(exp).date() < dt.date(): continue
+        
+        # Calculate TTM (using business day count from original logic)
+        t = calculate_ttm(dt, exp, holidays_np, year_basis)
+        if np.isnan(t) or t <= 0: continue
+        
+        raw_val = row_series.get(col, np.nan)
+        if pd.isna(raw_val): continue
+        
+        rate_frac = normalize_rate_input(raw_val, rate_unit)
+        rate_list.append(denormalize_to_percent(rate_frac))
+        ttm_list.append(t)
+        
     # Check if we have enough distinct points for interpolation
     if len(ttm_list) > 1 and len(set(np.round(ttm_list, 12))) > 1:
-        # Filter for points that are within the range of the standard grid
-        min_ttm = min(ttm_list)
-        max_ttm = max(ttm_list)
-        
-        # Only interpolate for points covered by the input data
-        target_ttm = np.array([t for t in std_arr if t >= min_ttm and t <= max_ttm])
-        
-        if len(target_ttm) == 0:
-            return np.full(len(std_arr), np.nan, dtype=float)
-        
         try:
+            # Determine which standard points are covered by the raw data
+            min_ttm = min(ttm_list)
+            max_ttm = max(ttm_list)
+            target_ttm = np.array([t for t in std_arr if t >= min_ttm and t <= max_ttm])
+            
+            if len(target_ttm) == 0:
+                return np.full(len(std_arr), np.nan, dtype=float)
+
             order = np.argsort(ttm_list)
             f = interp1d(np.array(ttm_list)[order], np.array(rate_list)[order], 
                          kind=interp_method, bounds_error=False, 
-                         fill_value=(rate_list[order[0]], rate_list[order[-1]]), # Linear extrapolation if needed
+                         fill_value=(rate_list[order[0]], rate_list[order[-1]]), # Linear extrapolation
                          assume_sorted=True)
             
             interpolated_rates = f(target_ttm)
@@ -128,22 +140,19 @@ def row_to_std_grid(row_series, available_tenor_cols, std_arr, rate_unit, interp
             return np.full(len(std_arr), np.nan, dtype=float)
     return np.full(len(std_arr), np.nan, dtype=float)
 
-
-def build_pca_matrix(yields_df_train, std_arr, std_cols, rate_unit, interp_method):
+def build_pca_matrix(yields_df_train, expiry_df, std_arr, std_cols, holidays_np, year_basis, rate_unit, interp_method):
     """
     Builds the full PCA input matrix (Outright Rates, Spreads, Flies)
-    from interpolated training data.
+    from interpolated training data based on contract expiries.
     """
-    # Identify columns that represent tenors (contain 'Y' or 'M')
-    available_tenor_cols = [col for col in yields_df_train.columns if any(s in col.upper() for s in ['M', 'Y'])]
-    
     pca_df_zeros = pd.DataFrame(np.nan, index=yields_df_train.index, columns=std_cols, dtype=float)
+    available_contracts = [col for col in yields_df_train.columns if col in expiry_df.index]
     
     # Step 1: Interpolate to Standard Grid (Outright Rates)
     for dt in yields_df_train.index:
         pca_df_zeros.loc[dt] = row_to_std_grid(
-            yields_df_train.loc[dt], available_tenor_cols,
-            std_arr, rate_unit, interp_method
+            dt, yields_df_train.loc[dt], available_contracts, expiry_df,
+            std_arr, holidays_np, year_basis, rate_unit, interp_method
         )
 
     # Remove rows where interpolation failed (all NaNs)
@@ -171,7 +180,7 @@ def build_pca_matrix(yields_df_train, std_arr, std_cols, rate_unit, interp_metho
     # Step 4: Combine all series
     pca_df_combined = pd.concat([pca_df_zeros, pca_df_spreads, pca_df_flies], axis=1)
 
-    # Handle NaNs: Fill with column mean (only for remaining single NaNs after the 'all' drop)
+    # Handle NaNs: Fill with column mean
     pca_vals = pca_df_combined.values.astype(float)
     col_means = np.nanmean(pca_vals, axis=0)
     if np.isnan(col_means).any():
@@ -213,15 +222,16 @@ def forecast_pcs_arima(PCs_df):
 # ---------------------------------------------------------------------------------
 
 def main():
-    st.title("🏛️ SOFR/Treasury Curve PCA Backtesting Engine")
-    st.markdown("This tool performs a walk-forward backtest of PCA-based curve forecasting models for fixed-tenor yields, analyzing **Outright Rates, Spreads, and Flies**.")
+    st.title("🏛️ SOFR Contract PCA Backtesting Engine")
+    st.markdown("This tool performs a walk-forward backtest of PCA-based curve forecasting models for **contract-based** yields, analyzing **Outright Rates, Spreads, and Flies**.")
     st.markdown("---")
 
     # --- Sidebar Inputs ---
     st.sidebar.header("1) Upload Data")
-    yield_file = st.sidebar.file_uploader("Yield data CSV (Dates and Tenor Columns: e.g., '1Y', '5Y')", type="csv")
-    
-    # Removed expiry_file and holiday_file for SOFR
+    st.sidebar.info("Requires three files to calculate TTM accurately.")
+    yield_file = st.sidebar.file_uploader("Yield data CSV (Daily Rates by Contract Ticker)", type="csv")
+    expiry_file = st.sidebar.file_uploader("Expiry mapping CSV (Contract Ticker -> Date)", type="csv")
+    holiday_file = st.sidebar.file_uploader("Holiday dates CSV (US Federal Holidays)", type="csv")
 
     st.sidebar.header("2) Configure Backtest")
     training_window_days = st.sidebar.number_input("Rolling Training Window (business days)", min_value=120, max_value=500, value=252, step=1)
@@ -235,8 +245,10 @@ def main():
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("Data Conventions")
-    rate_unit = st.sidebar.selectbox("Input rate unit", ["Percent (e.g. 13.45)", "Decimal (e.g. 0.1345)", "Basis points (e.g. 1345)"])
-    
+    rate_unit = st.sidebar.selectbox("Input rate unit", ["Percent (e.g. 5.45)", "Decimal (e.g. 0.0545)", "Basis points (e.g. 545)"])
+    year_basis = int(st.sidebar.selectbox("Year Basis for TTM (e.g. 252 or 365)", [252, 365], index=0))
+    interp_method = "linear" # Hardcoded for consistency
+
     # --- Run Button ---
     run_backtest = st.sidebar.button("Run Backtest", type="primary")
 
@@ -263,12 +275,12 @@ def main():
     if run_backtest:
         st.session_state.results_df = None # Clear previous results
 
-        if not yield_file:
-            st.error("Please upload the Yield data CSV file.")
+        if not all([yield_file, expiry_file]):
+            st.error("Please upload the Yield data CSV and the Expiry mapping CSV.")
             st.stop()
 
         @st.cache_data(show_spinner="Loading and sanitizing data...")
-        def load_all_data(yield_file):
+        def load_all_data(yield_file, expiry_file, holiday_file):
             # Yields
             yields_df = pd.read_csv(io.StringIO(yield_file.getvalue().decode("utf-8")))
             date_col = yields_df.columns[0]
@@ -276,15 +288,29 @@ def main():
             yields_df = yields_df.dropna(subset=[date_col]).set_index(date_col).sort_index()
             yields_df.columns = [str(c).strip() for c in yields_df.columns]
             for c in yields_df.columns:
-                # Only attempt conversion for columns that look like tenors
-                if any(s in c.upper() for s in ['M', 'Y']):
-                    yields_df[c] = pd.to_numeric(yields_df[c], errors="coerce")
+                yields_df[c] = pd.to_numeric(yields_df[c], errors="coerce")
             
-            return yields_df
+            # Expiry
+            expiry_raw = pd.read_csv(io.StringIO(expiry_file.getvalue().decode("utf-8")))
+            expiry_df = expiry_raw.iloc[:, :2].copy()
+            expiry_df.columns = ["MATURITY", "DATE"]
+            expiry_df["MATURITY"] = expiry_df["MATURITY"].astype(str).str.strip().str.upper()
+            expiry_df["DATE"] = expiry_df["DATE"].apply(safe_to_datetime)
+            expiry_df = expiry_df.dropna(subset=["DATE"]).set_index("MATURITY")
 
-        yields_df = load_all_data(yield_file)
+            # Holidays
+            holidays_np = np.array([], dtype="datetime64[D]")
+            if holiday_file:
+                hol_df = pd.read_csv(io.StringIO(holiday_file.getvalue().decode("utf-8")))
+                hol_series = hol_df.iloc[:, 0].apply(safe_to_datetime).dropna()
+                if not hol_series.empty:
+                    holidays_np = np.array(hol_series.dt.date, dtype="datetime64[D]")
+                    
+            return yields_df, expiry_df, holidays_np
 
-        # --- Date Range Selection (Moved here to use loaded data) ---
+        yields_df, expiry_df, holidays_np = load_all_data(yield_file, expiry_file, holiday_file)
+
+        # --- Date Range Selection ---
         st.sidebar.subheader("Backtest Period")
         max_date = yields_df.index.max().date()
         min_date = yields_df.index.min().date()
@@ -321,7 +347,7 @@ def main():
         backtest_range = pd.bdate_range(start=backtest_start_date, end=backtest_end_date)
         all_available_dates = yields_df.index
 
-        # Setup grid
+        # Setup SOFR grid
         std_arr, std_cols = build_std_grid_by_rule(max_year=30.0)
         spread_cols = [f"{std_cols[i]}-{std_cols[i-1]}" for i in range(1, len(std_cols))]
         fly_cols = [f"{std_cols[i+1]}x{std_cols[i]}x{std_cols[i-1]}" for i in range(1, len(std_cols) - 1)]
@@ -334,9 +360,7 @@ def main():
             if current_date not in all_available_dates:
                 continue
 
-            # T-1 is the training end date
             training_end_date = current_date - pd.Timedelta(days=1)
-            # Fetch a window large enough to select `training_window_days` of business days
             training_start_date = training_end_date - pd.DateOffset(days=training_window_days * 1.5)
             
             train_mask = (yields_df.index >= training_start_date) & (yields_df.index <= training_end_date)
@@ -344,8 +368,8 @@ def main():
 
             if len(yields_df_train) < training_window_days / 2: continue
 
-            # Build the full PCA matrix (interpolated TTMs, spreads, flies)
-            pca_df_filled = build_pca_matrix(yields_df_train, std_arr, std_cols, rate_unit, interp_method='linear')
+            # Build the full PCA matrix from interpolated training data
+            pca_df_filled = build_pca_matrix(yields_df_train, expiry_df, std_arr, std_cols, holidays_np, year_basis, rate_unit, interp_method)
             
             if pca_df_filled.empty: continue
 
@@ -379,8 +403,8 @@ def main():
 
             # Build the ACTUAL curve for comparison (using the interpolated rates of the actual day T)
             actual_full_curve_series = build_pca_matrix(
-                yields_df.loc[[current_date]], # Just the one day
-                std_arr, std_cols, rate_unit, interp_method='linear'
+                yields_df.loc[[current_date]], 
+                expiry_df, std_arr, std_cols, holidays_np, year_basis, rate_unit, interp_method
             )
             
             if actual_full_curve_series.empty: continue
@@ -407,26 +431,23 @@ def main():
 
 
     # --------------------------
-    # RESULTS ANALYSIS
+    # RESULTS ANALYSIS (Same plotting and analysis logic as original file)
     # --------------------------
     if st.session_state.results_df is not None:
         results_df = st.session_state.results_df.copy()
         
-        # Filter out rows where the actual curve is all NaN
         mask = results_df['Actual_Curve'].apply(lambda x: isinstance(x, float) or np.isnan(x).all())
         results_df = results_df[~mask].copy()
 
         if results_df.empty:
-            st.error("No valid results to analyze.")
+            st.error("No valid results to analyze. Ensure enough contract data was available in the backtest period.")
             st.stop()
 
-        # Get column names
         all_cols = results_df.iloc[0]['Column_Names']
         std_cols = [c for c in all_cols if 'x' not in c and '-' not in c]
         spread_cols = [c for c in all_cols if '-' in c and 'x' not in c]
         fly_cols = [c for c in all_cols if 'x' in c]
 
-        # Calculate daily errors
         def calculate_errors(row, cols):
             indices = [all_cols.index(c) for c in cols]
             pred = row['Predicted_Curve'][indices]
@@ -516,12 +537,10 @@ def main():
         if selected_spread_date:
             plot_data = results_df[results_df['Date'].dt.date == selected_spread_date]
             if not plot_data.empty:
-                # Indices for Spreads
                 spread_indices = [all_cols.index(c) for c in spread_cols]
                 actual_spreads = plot_data['Actual_Curve'].iloc[0][spread_indices]
                 pred_spreads = plot_data['Predicted_Curve'].iloc[0][spread_indices]
                 
-                # Indices for Flies
                 fly_indices = [all_cols.index(c) for c in fly_cols]
                 actual_flies = plot_data['Actual_Curve'].iloc[0][fly_indices]
                 pred_flies = plot_data['Predicted_Curve'].iloc[0][fly_indices]
@@ -555,12 +574,10 @@ def main():
 
         raw_df = pd.DataFrame(results_df['Date']).set_index('Date')
         
-        # Get the start and end indices for all metric types
         rates_start_idx = 0
         spreads_start_idx = len(std_cols)
         flies_start_idx = spreads_start_idx + len(spread_cols)
 
-        # Extract predicted and actual components
         for i, col in enumerate(std_cols):
             raw_df[f"Predicted_Rate_{col}"] = results_df['Predicted_Curve'].apply(lambda x: x[rates_start_idx + i])
             raw_df[f"Actual_Rate_{col}"] = results_df['Actual_Curve'].apply(lambda x: x[rates_start_idx + i])
