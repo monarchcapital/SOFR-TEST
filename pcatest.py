@@ -448,8 +448,8 @@ if price_data is not None and expiry_data is not None:
         
         if derivatives_df.shape[1] > 0 and derivatives_df.shape[0] > 100: # Check for minimum data
             
-            # --- 4. PCA Execution and Factor Selection ---
-            st.header("2. PCA Execution and Factor Selection")
+            # --- 3. PCA Execution and Factor Selection ---
+            st.header("3. PCA Execution and Factor Selection")
             
             max_pcs = min(20, derivatives_df.shape[1])
             n_components = st.slider("Select Number of Principal Components to Keep", 
@@ -481,14 +481,14 @@ if price_data is not None and expiry_data is not None:
             st.dataframe(var_df.T, use_container_width=True)
             
             
-            # --- 5. Factor Interpretation: Loadings and Shapes ---
-            st.header("3. Factor Interpretation: Loadings and Shapes")
+            # --- 4. Factor Interpretation: Loadings and Shapes ---
+            st.header("4. Factor Interpretation: Loadings and Shapes")
             
             # Filter loadings to only the selected number of components
             selected_loadings = loadings.iloc[:, :n_components]
             
-            # --- 5.1. Derivative Loadings Heatmap ---
-            st.markdown("##### 3.1. Derivative Loadings Heatmap")
+            # --- 4.1. Derivative Loadings Heatmap ---
+            st.markdown("##### 4.1. Derivative Loadings Heatmap")
             fig_loadings, ax_loadings = plt.subplots(figsize=(12, 0.4 * selected_loadings.shape[0]))
             sns.heatmap(selected_loadings, annot=True, cmap="coolwarm", fmt=".2f", linewidths=.5, linecolor='black', cbar_kws={'label': 'Loadings (Weights)'}, ax=ax_loadings)
             ax_loadings.set_title(f"PCA Factor Loadings on Derivatives (3M, 6M, 12M Spreads/Flies)")
@@ -497,8 +497,8 @@ if price_data is not None and expiry_data is not None:
             plt.tight_layout()
             st.pyplot(fig_loadings)
             
-            # --- 5.2. Outright Price Loadings (Factor Shapes) ---
-            st.markdown("##### 3.2. Outright Price Loadings (Factor Shapes)")
+            # --- 4.2. Outright Price Loadings (Factor Shapes) ---
+            st.markdown("##### 4.2. Outright Price Loadings (Factor Shapes)")
             outright_loadings = calculate_outright_loadings(selected_loadings, outright_contracts, derivatives_df)
             
             fig_shape, ax_shape = plt.subplots(figsize=(12, 6))
@@ -512,11 +512,12 @@ if price_data is not None and expiry_data is not None:
             st.pyplot(fig_shape)
 
             
-            # --- 6. Factor Scores and Z-Scores ---
-            st.header("4. Factor Scores Time Series and Z-Scores")
+            # --- 5. Factor Scores and Z-Scores ---
+            st.header("5. Factor Scores Time Series and Z-Scores")
             
+            # Calculate Scores and Z-Scores (using max_pcs for time series for historical context)
             reconstructed_df, scores = transform_and_reconstruct(
-                derivatives_df, pca, data_mean, data_std, n_components=max_pcs # Use max for scores time series
+                derivatives_df, pca, data_mean, data_std, n_components=max_pcs
             )
             selected_scores = scores.iloc[:, :n_components]
             z_scores = calculate_z_scores(selected_scores)
@@ -533,12 +534,8 @@ if price_data is not None and expiry_data is not None:
                 
             st.markdown("###### Factor Z-Scores (Current Deviation)")
             st.dataframe(z_scores.iloc[-1:].T.rename(columns={z_scores.index[-1]: 'Z-Score'}), use_container_width=True)
-
-
-            # --- 7. Curve Snapshot Analysis (Mispricing) (UPDATED to use combined data) ---
-            st.header("5. Curve Snapshot Analysis (Mispricing)")
             
-            # Recalculate Reconstruction using ONLY the selected PCs
+            # --- Pre-calculate Fair Values for Snapshots (only using selected PCs) ---
             reconstructed_derivatives_selected, _ = transform_and_reconstruct(
                 derivatives_df, pca, data_mean, data_std, num_pcs=n_components
             )
@@ -554,9 +551,11 @@ if price_data is not None and expiry_data is not None:
                 nearest_contract_price
             )
 
+
+            # --- 6. Outright Price Mispricing Snapshot (NEW SEPARATE SECTION) ---
+            st.markdown("---")
+            st.header("6. Outright Price Mispricing Snapshot")
             
-            # --- 7.1. Outright Price Mispricing ---
-            st.markdown("### Outright Prices")
             try:
                 # Get prices for the analysis date
                 original_prices_snap = price_data.loc[analysis_date].dropna()
@@ -600,17 +599,15 @@ if price_data is not None and expiry_data is not None:
                 st.error(f"The selected analysis date **{analysis_date.strftime('%Y-%m-%d')}** is not present in the filtered price data. Please choose a different date within the historical range.")
             
             
-            # --- 7.2. Spread Mispricing ---
+            # --- 7. Calendar Spread Mispricing Snapshot (NEW SEPARATE SECTION) ---
             st.markdown("---")
-            st.markdown("### Calendar Spreads (3M, 6M, 12M)")
+            st.header("7. Calendar Spread Mispricing Snapshot (3M, 6M, 12M)")
             
-            # Check if there are any spreads calculated (should always be if > 1 contract)
             if spreads_df.shape[1] > 0:
                 try:
                     original_spreads_snap = spreads_df.loc[analysis_date].dropna()
                     pca_fair_spreads_snap = pca_fair_spreads.loc[analysis_date].dropna()
                     
-                    # Align and calculate mispricing
                     spread_comparison = pd.DataFrame({
                         'Original': original_spreads_snap,
                         'PCA Fair': pca_fair_spreads_snap
@@ -631,7 +628,7 @@ if price_data is not None and expiry_data is not None:
                     st.pyplot(fig_spread)
 
                     # --- Detailed Spread Table ---
-                    st.markdown("###### Calendar Spread Mispricing (3M, 6M, 12M)") # Updated header
+                    st.markdown("###### Calendar Spread Mispricing (3M, 6M, 12M)")
                     detailed_comparison_spread = spread_comparison.copy()
                     detailed_comparison_spread.index.name = 'Calendar Spread'
                     detailed_comparison_spread['Mispricing (BPS)'] = mispricing * 10000
@@ -653,17 +650,15 @@ if price_data is not None and expiry_data is not None:
                 st.info("Not enough contracts (need 2 or more) to calculate and plot spread snapshot.")
                 
 
-            # --- 7.3. Butterfly Mispricing ---
+            # --- 8. Butterfly Mispricing Snapshot (NEW SEPARATE SECTION) ---
             st.markdown("---")
-            st.markdown("### Butterflies (3M, 6M, 12M)")
+            st.header("8. Butterfly Mispricing Snapshot (3M, 6M, 12M Leg)")
             
-            # Check if there are any butterflies calculated (should always be if > 2 contracts)
             if butterflies_df.shape[1] > 0:
                 try:
                     original_fly_snap = butterflies_df.loc[analysis_date].dropna()
                     pca_fair_fly_snap = pca_fair_butterflies.loc[analysis_date].dropna()
                     
-                    # Align and calculate mispricing
                     fly_comparison = pd.DataFrame({
                         'Original': original_fly_snap,
                         'PCA Fair': pca_fair_fly_snap
@@ -684,7 +679,7 @@ if price_data is not None and expiry_data is not None:
                     st.pyplot(fig_fly)
 
                     # --- Detailed Fly Table ---
-                    st.markdown("###### Butterfly (Fly) Mispricing (3M, 6M, 12M)") # Updated header
+                    st.markdown("###### Butterfly (Fly) Mispricing (3M, 6M, 12M)")
                     detailed_comparison_fly = fly_comparison.copy()
                     detailed_comparison_fly.index.name = 'Butterfly Contract'
                     detailed_comparison_fly['Mispricing (BPS)'] = mispricing * 10000
