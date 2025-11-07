@@ -1197,7 +1197,7 @@ if not price_df_filtered.empty:
                 st.warning("Generalized Hedging calculation failed for the selected trade. Check if enough historical data is available after filtering.")
 
 
-        # --------------------------- 8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging - UPDATED) ---------------------------
+        # --------------------------- 8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging - CORRECTED) ---------------------------
         st.header("8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging)")
         st.markdown(f"""
             This section calculates the hedge ratio ($k_{{factor}}$) required to **completely neutralize** the exposure of a chosen trade to a specific **macro risk factor** (Level, Slope, or Curvature). The **optimal hedge instrument** is **automatically selected** based on having the **highest absolute sensitivity** to the chosen factor.
@@ -1230,14 +1230,14 @@ if not price_df_filtered.empty:
                     "1. Select Trade Instrument (Long 1 unit):", 
                     options=instrument_options,
                     index=0,
-                    key='trade_instrument_factor_auto' # Changed key
+                    key='trade_instrument_factor_auto' 
                 )
             with col_factor_sel:
                 factor_selection = st.selectbox(
                     "2. Select Factor to Neutralize:", 
                     options=factor_options,
                     index=0,
-                    key='factor_select_auto' # Changed key
+                    key='factor_select_auto' 
                 )
             
             st.markdown("---")
@@ -1251,13 +1251,15 @@ if not price_df_filtered.empty:
                 # Exclude the trade itself
                 hedge_candidates = sensitivities_to_factor.drop(trade_selection_factor, errors='ignore') 
                 
+                # --- CORRECTED LOGIC FOR BEST HEDGE SELECTION ---
                 # Find the instrument with the highest absolute sensitivity (best hedge)
                 if hedge_candidates.empty:
                     st.error("Cannot select a hedge instrument: The trade is the only available instrument.")
                     st.stop()
                     
+                # Use .abs().idxmax() to find the index of the largest absolute value
                 best_hedge_label = hedge_candidates.abs().idxmax()
-                hedge_selection_factor = best_hedge_label # Set the best hedge for calculation
+                hedge_selection_factor = best_hedge_label # The optimal hedge
                 
                 # 4. Calculate Hedge Ratio
                 k_factor, error_msg = calculate_factor_hedge_ratio(
