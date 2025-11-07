@@ -98,7 +98,7 @@ def perform_pca_on_prices(df, pc_count):
     """Performs PCA on the historical price levels."""
     
     if df.shape[0] < pc_count or df.shape[1] < pc_count:
-        return None, None, None, None
+        return None, None, None, None, None
 
     # 1. Prepare data: Center the prices (P - Mean(P))
     mean_prices = df.mean()
@@ -351,7 +351,7 @@ def solve_scenario_hedge(trade_instrument, hedge1, hedge2, sensitivities):
 # --- Streamlit Application Layout ---
 
 st.title("🏛️ SOFR Futures PCA & Advanced Hedging Analyzer")
-st.markdown("Use historical price data to decompose curve movements into Principal Components (Level, Slope, Curve) and calculate optimal hedge ratios based on Minimum Variance and specific market scenarios.")
+st.markdown("Use historical price data to decompose curve movements into **Principal Components (Level, Slope, Curve)** and calculate **optimal hedge ratios** based on Minimum Variance and specific market scenarios.")
 
 # --- 1. Data Upload and Parameters ---
 with st.sidebar:
@@ -364,8 +364,14 @@ with st.sidebar:
     expiry_df = load_data(expiry_file)
 
     if price_df is not None:
-        min_date = price_df.index.min().to_pydatetime().date()
-        max_date = price_df.index.max().to_pydatetime().date()
+        # Safely determine min/max dates
+        try:
+            min_date = price_df.index.min().to_pydatetime().date()
+            max_date = price_df.index.max().to_pydatetime().date()
+        except AttributeError:
+             # Handle case where index might not be datetime objects after parsing
+             min_date = date(2020, 1, 1)
+             max_date = date.today()
     else:
         min_date = date(2020, 1, 1)
         max_date = date.today()
@@ -391,6 +397,8 @@ with st.sidebar:
 if price_df is not None and expiry_df is not None:
     # 1. Filter Data based on time range and expiry
     price_df_filtered, sorted_contracts = get_analysis_contracts(price_df, expiry_df, analysis_date)
+    
+    # Ensure all required contracts are available up to the analysis date
     historical_price_df = price_df_filtered.loc[start_date:end_date]
     
     if historical_price_df.empty:
@@ -398,6 +406,7 @@ if price_df is not None and expiry_df is not None:
         st.stop()
         
     # 2. Calculate Derivatives
+    # Fixed 3M gap for spreads/butterflies for simplicity
     historical_spreads_df = calculate_derivatives(historical_price_df, sorted_contracts, 'Spread', 3)
     historical_butterflies_df = calculate_derivatives(historical_price_df, sorted_contracts, 'Butterfly', 3)
     
@@ -436,6 +445,7 @@ if price_df is not None and expiry_df is not None:
             ax_loadings.set_xlabel("Futures Contract")
             plt.xticks(rotation=45, ha='right')
             plt.grid(axis='y', linestyle='--')
+            plt.tight_layout()
             st.pyplot(fig_loadings)
 
 
@@ -443,17 +453,19 @@ if price_df is not None and expiry_df is not None:
         st.header(f"3. Market Mispricing Snapshot ({analysis_date.strftime('%Y-%m-%d')})")
         
         # 3.1 Outright Mispricing
-        st.subheader("3.1 Outright Contract Mispricing")
+        st.subheader("3.1 Outright Contract Mispricing (P - PCA Fair)")
         try:
             comparison_outright, mispricing_outright = calculate_snapshot_comparison(historical_price_df, fair_curve_prices, analysis_dt, is_outright=True)
             
             fig_outright, ax_outright = plt.subplots(figsize=(12, 5))
-            mispricing_outright.mul(10000).plot(kind='bar', ax=ax_outright, color=np.where(mispricing_outright.mul(10000) > 0, 'green', 'red'))
+            mispricing_outright.mul(10000).plot(kind='bar', ax=ax_outright, 
+                                                color=np.where(mispricing_outright.mul(10000) > 0, 'green', 'red'))
             ax_outright.set_title(f"Outright Mispricing (Actual - PCA Fair) in BPS ({pc_count} Factors)")
             ax_outright.set_ylabel("Mispricing (BPS)")
             ax_outright.set_xlabel("Futures Contract")
             plt.xticks(rotation=45, ha='right')
             plt.grid(axis='y', linestyle='--')
+            plt.tight_layout()
             st.pyplot(fig_outright)
             
             # Detailed Table
@@ -481,12 +493,14 @@ if price_df is not None and expiry_df is not None:
             try:
                 comparison_spread, mispricing_spread = calculate_snapshot_comparison(historical_spreads_df, fair_curve_prices, analysis_dt, is_outright=False)
                 fig_spread, ax_spread = plt.subplots(figsize=(12, 5))
-                mispricing_spread.mul(10000).plot(kind='bar', ax=ax_spread, color=np.where(mispricing_spread.mul(10000) > 0, 'green', 'red'))
+                mispricing_spread.mul(10000).plot(kind='bar', ax=ax_spread, 
+                                                  color=np.where(mispricing_spread.mul(10000) > 0, 'green', 'red'))
                 ax_spread.set_title(f"Spread Mispricing (Actual - PCA Fair) in BPS ({pc_count} Factors)")
                 ax_spread.set_ylabel("Mispricing (BPS)")
                 ax_spread.set_xlabel("Spread Contract (C1-C2)")
                 plt.xticks(rotation=45, ha='right')
                 plt.grid(axis='y', linestyle='--')
+                plt.tight_layout()
                 st.pyplot(fig_spread)
                 
                 detailed_comparison_spread = comparison_spread.copy()
@@ -499,6 +513,33 @@ if price_df is not None and expiry_df is not None:
                 st.error(f"The selected analysis date **{analysis_date.strftime('%Y-%m-%d')}** is not present in the filtered price data for Spreads.")
         else:
             st.info("Not enough contracts (need 2 or more) to calculate spreads.")
+            
+        # 3.3 Butterfly Mispricing
+        st.subheader("3.3 Butterfly Mispricing (3M Gap)")
+        if not historical_butterflies_df.empty:
+            try:
+                comparison_fly, mispricing_fly = calculate_snapshot_comparison(historical_butterflies_df, fair_curve_prices, analysis_dt, is_outright=False)
+                fig_fly, ax_fly = plt.subplots(figsize=(12, 5))
+                mispricing_fly.mul(10000).plot(kind='bar', ax=ax_fly, 
+                                               color=np.where(mispricing_fly.mul(10000) > 0, 'green', 'red'))
+                ax_fly.set_title(f"Butterfly Mispricing (Actual - PCA Fair) in BPS ({pc_count} Factors)")
+                ax_fly.set_ylabel("Mispricing (BPS)")
+                ax_fly.set_xlabel("Butterfly Contract (C1-2xC2+C3)")
+                plt.xticks(rotation=45, ha='right')
+                plt.grid(axis='y', linestyle='--')
+                plt.tight_layout()
+                st.pyplot(fig_fly)
+                
+                detailed_comparison_fly = comparison_fly.copy()
+                detailed_comparison_fly['Mispricing (BPS)'] = mispricing_fly * 10000
+                st.dataframe(
+                    detailed_comparison_fly.style.format({'Original': "{:.4f}", 'PCA Fair': "{:.4f}", 'Mispricing (BPS)': "{:.2f}"}),
+                    use_container_width=True
+                )
+            except KeyError:
+                st.error(f"The selected analysis date **{analysis_date.strftime('%Y-%m-%d')}** is not present in the filtered price data for Butterflies.")
+        else:
+            st.info("Not enough contracts (need 3 or more) to calculate butterflies.")
 
 
         # --- 4. Advanced Hedging Analysis ---
@@ -510,8 +551,8 @@ if price_df is not None and expiry_df is not None:
         
         # UI for Trade Selection
         all_instruments = factor_sensitivities.index.tolist()
-        trade_instrument = st.selectbox("Select Your Trade Instrument", all_instruments)
-        trade_direction = st.radio("Trade Direction", ['Buy (Long 1 unit)', 'Sell (Short 1 unit)'])
+        trade_instrument = st.selectbox("Select Your Trade Instrument (T)", all_instruments)
+        trade_direction = st.radio("Trade Direction of T", ['Buy (Long 1 unit)', 'Sell (Short 1 unit)'])
         is_long = (trade_direction == 'Buy (Long 1 unit)')
         
         
@@ -537,8 +578,10 @@ if price_df is not None and expiry_df is not None:
             
             # Determine Final Action (Long/Short) based on trade direction and MVHR sign
             if is_long:
+                # Long trade: hedge (H) takes opposite sign of MVHR
                 action = "Short" if h_star > 0 else "Long"
             else: # is_short
+                # Short trade: hedge (H) takes same sign as MVHR
                 action = "Long" if h_star > 0 else "Short"
             
             st.success(f"To hedge 1 unit of **{trade_instrument}**, take a position of **{action} {abs(h_star):.2f} units** of the **{best_hedge['Hedge Candidate']}**.")
@@ -557,20 +600,28 @@ if price_df is not None and expiry_df is not None:
         
         # --- 4.3 Scenario-Based Hedging (PC1/PC2 Neutral) ---
         if pc_count >= 2:
-            st.subheader("4.3 Scenario-Based Hedging (Level and Slope Neutral)")
-            st.markdown("Creates a hedge that is perfectly neutral to a **Parallel Shift (PC1)** and **Steepening/Flattening (PC2)**. This is a robust factor hedge, leaving only PC3 and idiosyncratic risk.")
+            st.subheader("4.3 Scenario-Based Hedging (PC1/PC2 Neutral)")
+            st.markdown("Creates a hedge that is perfectly neutral to a **Parallel Shift (PC1 - Level)** and **Steepening/Flattening (PC2 - Slope)**.")
 
             # Select two hedge candidates for the 2x2 system
             hedge_candidates_2x2 = [i for i in all_instruments if i != trade_instrument]
             
             col_h1, col_h2 = st.columns(2)
             with col_h1:
-                hedge1 = st.selectbox("Select Hedge Candidate 1 (H1)", hedge_candidates_2x2, index=0)
+                # Find the index of the best MVH candidate to use as a default
+                best_hedge_name = best_hedge['Hedge Candidate'] if not mvhr_results.empty else hedge_candidates_2x2[0]
+                default_h1_idx = hedge_candidates_2x2.index(best_hedge_name) if best_hedge_name in hedge_candidates_2x2 else 0
+                hedge1 = st.selectbox("Select Hedge Candidate 1 (H1)", hedge_candidates_2x2, index=default_h1_idx)
+            
             with col_h2:
                 # Ensure H2 is not the same as H1
-                default_h2_idx = 1 if len(hedge_candidates_2x2) > 1 else 0
-                if hedge1 == hedge_candidates_2x2[default_h2_idx]:
+                default_h2_idx = (default_h1_idx + 1) % len(hedge_candidates_2x2)
+                if len(hedge_candidates_2x2) > 1 and hedge1 == hedge_candidates_2x2[default_h2_idx]:
                     default_h2_idx = (default_h2_idx + 1) % len(hedge_candidates_2x2)
+                
+                # Ensure index is within bounds for the selectbox
+                default_h2_idx = min(default_h2_idx, len(hedge_candidates_2x2) - 1) if len(hedge_candidates_2x2) > 0 else 0
+                
                 hedge2 = st.selectbox("Select Hedge Candidate 2 (H2)", hedge_candidates_2x2, index=default_h2_idx)
 
             if hedge1 != hedge2:
@@ -580,9 +631,24 @@ if price_df is not None and expiry_df is not None:
                     
                     st.markdown("##### Required Hedge Weights (Hedge 1 & 2 per 1 Unit of Trade)")
 
-                    # Determine Final Action (Long/Short) for H1 and H2
-                    action_h1 = "Short" if (is_long and h1 > 0) or (not is_long and h1 < 0) else "Long"
-                    action_h2 = "Short" if (is_long and h2 > 0) or (not is_long and h2 < 0) else "Long"
+                    # Determine Final Action (Long/Short) for H1 and H2 based on trade direction
+                    
+                    # For a Long Trade: Portfolio is T - h1*H1 - h2*H2. Weights h1, h2 are required to zero out betas.
+                    # The action taken in H1/H2 is short if h > 0, long if h < 0.
+                    # For a Short Trade: Portfolio is -T + h1*H1 + h2*H2. The weights are mathematically h1, h2 but the sign of the trade is reversed.
+                    # To maintain the factor neutrality relative to the market move, the signs of h1 and h2 must be flipped
+                    
+                    # Simplified logic: The calculated h1, h2 are for the Long position (T).
+                    # If trade is Long: Action is opposite sign of h
+                    # If trade is Short: Action is same sign of h (reverse of the reversal)
+                    
+                    if is_long:
+                        action_h1 = "Short" if h1 > 0 else "Long"
+                        action_h2 = "Short" if h2 > 0 else "Long"
+                    else:
+                        action_h1 = "Long" if h1 > 0 else "Short"
+                        action_h2 = "Long" if h2 > 0 else "Short"
+
                     
                     st.dataframe(
                         pd.DataFrame({
@@ -595,7 +661,10 @@ if price_df is not None and expiry_df is not None:
                     
                     st.markdown("---")
                     st.info(f"The resulting portfolio is neutral to PC1 (Level) and PC2 (Slope). The residual exposure to PC3 (Curve) is **{residual_pc3:.4f}**.")
-                    st.warning("If the trade direction is **Short**, all calculated hedge weights (h1 and h2) must be taken in the **opposite direction** of the hedge to maintain the factor-neutral relationship relative to the market.")
+                    
+                    if not is_long:
+                        st.warning("Note: Since your trade direction is **Short**, the hedge actions shown maintain the factor neutrality. Mathematically, the weights were calculated for the **Long** trade, but the actions have been **reversed** to match the Short position's factor exposures.")
+
                 
                 else:
                     st.warning("Could not solve the hedge system. This typically happens if the two hedge candidates are too correlated (e.g., adjacent outright contracts) or PC1/PC2 factors are not available.")
@@ -607,7 +676,7 @@ if price_df is not None and expiry_df is not None:
 
 
     else:
-        st.error("PCA failed. Please ensure you have enough unique contracts (min 2) and enough historical data points.")
+        st.error("PCA failed. Please upload both Historical Price Data and Expiry Data and check your PCA parameters and date range.")
 
 else:
     st.info("Please upload both Historical Price Data and Expiry Data files to begin the analysis.")
