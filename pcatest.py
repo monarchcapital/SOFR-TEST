@@ -428,13 +428,13 @@ def reconstruct_prices_and_derivatives(analysis_curve_df, reconstructed_spreads_
         # Drop columns in the reconstructed derivatives where the calculation might have failed due to missing outright prices
         reconstructed_deriv = reconstructed_deriv.dropna(axis=1, how='all')
 
-        # Merge original and reconstructed for comparison
-        original_rename = {col: col + ' (Original)' for col in original_df_aligned.columns}
-        pca_rename = {col: col + ' (PCA)' for col in reconstructed_deriv.columns}
-
         # Filter the original dataframe to only include columns that were successfully reconstructed
-        original_df_renamed = original_df_aligned[reconstructed_deriv.columns].rename(columns=original_rename)
-        pca_df_renamed = reconstructed_deriv.rename(columns=pca_rename)
+        original_df_renamed = original_df_aligned[reconstructed_deriv.columns].rename(
+            columns={col: col + ' (Original)' for col in reconstructed_deriv.columns}
+        )
+        pca_df_renamed = reconstructed_deriv.rename(
+            columns={col: col + ' (PCA)' for col in reconstructed_deriv.columns}
+        )
         
         historical_derivatives[derivative_type] = pd.merge(original_df_renamed, pca_df_renamed, left_index=True, right_index=True)
 
@@ -1049,7 +1049,8 @@ if not price_df_filtered.empty:
             historical_data = historical_derivatives_map.get(derivative_type)
             
             if historical_data is None or historical_data.empty:
-                st.info(f"Skipping 7.{starting_sub_section_num + i}. {derivative_type} snapshot: Not enough contracts for calculation.")
+                # MODIFIED MESSAGE to explain why it is skipped
+                st.info(f"Skipping 7.{starting_sub_section_num + i}. {derivative_type} snapshot. The available curve ({len(contract_labels)} contracts) is too short to construct any {derivative_type}.")
                 continue
                 
             st.subheader(f"7.{starting_sub_section_num + i}. {derivative_type} Snapshot")
