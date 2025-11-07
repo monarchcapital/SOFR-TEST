@@ -517,7 +517,7 @@ def calculate_best_and_worst_hedge_generalized(trade_label, Sigma_Raw_df):
     # Return the individual best/worst series AND the full DataFrame
     return best_hedge, worst_hedge, results_df
 
-# --- NEW FACTOR-BASED HEDGING LOGIC (Section 8) ---
+# --- FACTOR-BASED HEDGING LOGIC (Section 8) ---
 
 def calculate_factor_sensitivities(loadings_df_gen, pc_count):
     """
@@ -1197,15 +1197,15 @@ if not price_df_filtered.empty:
                 st.warning("Generalized Hedging calculation failed for the selected trade. Check if enough historical data is available after filtering.")
 
 
-        # --------------------------- 8. PCA-Based Factor Hedging Strategy (NEW SECTION) ---------------------------
+        # --------------------------- 8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging - UPDATED) ---------------------------
         st.header("8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging)")
         st.markdown(f"""
-            This section calculates the hedge ratio ($k_{{factor}}$) required to **completely neutralize** the exposure of a chosen trade to a specific **macro risk factor** (Level, Slope, or Curvature). This is a purely factor-driven hedge, ignoring residual (diversifiable) risk, and is useful for expressing a pure view on a specific curve movement.
+            This section calculates the hedge ratio ($k_{{factor}}$) required to **completely neutralize** the exposure of a chosen trade to a specific **macro risk factor** (Level, Slope, or Curvature). The **optimal hedge instrument** is **automatically selected** based on having the **highest absolute sensitivity** to the chosen factor.
             
             * **Factor View:** Hedge is used to remove sensitivity to the selected factor.
             * **Trade:** Long 1 unit of the selected instrument.
-            * **Hedge:** Short $k_{{factor}}$ units of the hedging instrument.
-            * **Formula:** $k_{{factor}} = \\frac{{\\text{{Sensitivity}}(\\text{{Trade}}, \\text{{Factor}})}}{{\\text{{Sensitivity}}(\\text{{Hedge}}, \\text{{Factor}})}}$
+            * **Hedge:** Short $k_{{factor}}$ units of the automatically selected optimal instrument.
+            * **Formula:** $k_{{factor}} = \\frac{{\\text{{Sensitivity}}(\\text{{Trade}}, \\text{{Factor}})}}{{\\text{{Sensitivity}}(\\text{{Optimal Hedge}}, \\text{{Factor}})}}$
         """)
         
         if loadings_df_gen.empty or loadings_df_gen.shape[0] < 2:
@@ -1219,8 +1219,8 @@ if not price_df_filtered.empty:
                  st.error("Factor sensitivity calculation failed.")
                  st.stop()
                  
-            # 2. Setup the selection boxes
-            col_trade_sel, col_hedge_sel, col_factor_sel = st.columns(3)
+            # 2. Setup the selection boxes (Only need trade and factor selection now)
+            col_trade_sel, col_factor_sel = st.columns(2)
             
             instrument_options = factor_sensitivities_df.index.tolist()
             factor_options = factor_sensitivities_df.columns.tolist()
@@ -1230,29 +1230,36 @@ if not price_df_filtered.empty:
                     "1. Select Trade Instrument (Long 1 unit):", 
                     options=instrument_options,
                     index=0,
-                    key='trade_instrument_factor'
-                )
-            with col_hedge_sel:
-                # Exclude the trade instrument itself from the hedge candidates
-                hedge_options = [c for c in instrument_options if c != trade_selection_factor]
-                hedge_selection_factor = st.selectbox(
-                    "2. Select Hedge Instrument:", 
-                    options=hedge_options,
-                    index=0 if hedge_options else None,
-                    key='hedge_instrument_factor'
+                    key='trade_instrument_factor_auto' # Changed key
                 )
             with col_factor_sel:
                 factor_selection = st.selectbox(
-                    "3. Select Factor to Neutralize:", 
+                    "2. Select Factor to Neutralize:", 
                     options=factor_options,
                     index=0,
-                    key='factor_select'
+                    key='factor_select_auto' # Changed key
                 )
-
+            
             st.markdown("---")
             
-            # 4. Calculate Hedge Ratio
-            if trade_selection_factor and hedge_selection_factor and factor_selection:
+            # 3. Automatic Best Hedge Selection and Hedge Ratio Calculation
+            if trade_selection_factor and factor_selection:
+                
+                # Find the Best Hedge Candidate
+                sensitivities_to_factor = factor_sensitivities_df[factor_selection]
+                
+                # Exclude the trade itself
+                hedge_candidates = sensitivities_to_factor.drop(trade_selection_factor, errors='ignore') 
+                
+                # Find the instrument with the highest absolute sensitivity (best hedge)
+                if hedge_candidates.empty:
+                    st.error("Cannot select a hedge instrument: The trade is the only available instrument.")
+                    st.stop()
+                    
+                best_hedge_label = hedge_candidates.abs().idxmax()
+                hedge_selection_factor = best_hedge_label # Set the best hedge for calculation
+                
+                # 4. Calculate Hedge Ratio
                 k_factor, error_msg = calculate_factor_hedge_ratio(
                     trade_selection_factor, 
                     hedge_selection_factor, 
@@ -1261,21 +1268,19 @@ if not price_df_filtered.empty:
                 )
 
                 if k_factor is not None:
-                    st.success(f"**Factor Hedge Result**")
+                    # Display Success and Hedge Recommendation with explanation
+                    st.success(f"**Optimal Factor Hedge Result for Neutralizing {factor_selection}**")
+                    
+                    trade_sens = factor_sensitivities_df.loc[trade_selection_factor, factor_selection]
+                    hedge_sens = factor_sensitivities_df.loc[hedge_selection_factor, factor_selection]
+                    
                     st.markdown(f"""
-                        To neutralize the **{factor_selection}** risk (i.e., making the portfolio $\\beta_{{\\text{{Factor}}}} = 0$):
+                        The optimal hedge instrument is chosen as **{best_hedge_label}** because it has the **highest absolute sensitivity** to the **{factor_selection}** factor ({abs(hedge_sens):.4f}), making it the most efficient instrument to use for neutralization.
                         
-                        * **Trade:** Long 1 unit of **{trade_selection_factor}**
-                        * **Hedge Action:** Short **{k_factor:.4f}** units of **{hedge_selection_factor}**
+                        * **Trade:** Long 1 unit of **{trade_selection_factor}** (Sensitivity: **{trade_sens:.4f}**)
+                        * **Hedge Action:** Short **{k_factor:.4f}** units of the **Optimal Hedge Instrument** (**{best_hedge_label}**)
                     """)
                     
-                    # Display the sensitivities that led to the ratio
-                    col_trade_sens, col_hedge_sens = st.columns(2)
-                    with col_trade_sens:
-                        st.info(f"Trade Sensitivity to {factor_selection}: **{factor_sensitivities_df.loc[trade_selection_factor, factor_selection]:.4f}**")
-                    with col_hedge_sens:
-                        st.info(f"Hedge Sensitivity to {factor_selection}: **{factor_sensitivities_df.loc[hedge_selection_factor, factor_selection]:.4f}**")
-                        
                     st.markdown("---")
                     
                     # 5. Display Full Sensitivities Table
@@ -1290,7 +1295,7 @@ if not price_df_filtered.empty:
                 else:
                     st.error(f"Factor hedge calculation failed: {error_msg}")
             else:
-                 st.info("Please ensure both trade and hedge instruments are selected.")
+                 st.info("Please ensure a trade instrument and a factor are selected.")
 
 
     else:
