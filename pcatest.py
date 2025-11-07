@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from sklearn.decomposition import PCA
-from sklearn.linear_model import LinearRegression # Added for Generalized Hedging
+from sklearn.linear_model import LinearRegression 
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime, date
@@ -407,12 +407,13 @@ def calculate_best_and_worst_hedge_3M(trade_label, loadings_df, eigenvalues, pc_
     return best_hedge, worst_hedge, results_df
 
 
-# --- NEW GENERALIZED HEDGING LOGIC (Section 7) ---
+# --- GENERALIZED HEDGING LOGIC (Section 7) ---
 
 def calculate_derivatives_covariance_generalized(all_derivatives_df, scores_df, eigenvalues, pc_count):
     """
     Calculates the Raw Covariance Matrix for ALL derivatives (Spreads, Flies) 
     by projecting their standardized time series onto the standardized 3M Spread PC scores.
+    Returns the Raw Covariance Matrix, the aligned derivatives data, and the standardized loadings (L_D).
     """
     # 1. Align and clean data - ensure all derivatives are aligned with the PC scores index
     aligned_index = all_derivatives_df.index.intersection(scores_df.index)
@@ -420,7 +421,8 @@ def calculate_derivatives_covariance_generalized(all_derivatives_df, scores_df, 
     scores_aligned = scores_df.loc[aligned_index]
     
     if derivatives_aligned.empty:
-        return pd.DataFrame(), pd.DataFrame()
+        # Return empty dataframes, but return all three expected variables
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame() 
         
     # 2. Standardize all derivatives
     derivatives_mean = derivatives_aligned.mean()
@@ -459,7 +461,7 @@ def calculate_derivatives_covariance_generalized(all_derivatives_df, scores_df, 
     
     Sigma_Raw_df = pd.DataFrame(Sigma_Raw, index=derivatives_aligned.columns, columns=derivatives_aligned.columns)
     
-    return Sigma_Raw_df, derivatives_aligned
+    return Sigma_Raw_df, derivatives_aligned, loadings_df
 
 def calculate_best_and_worst_hedge_generalized(trade_label, Sigma_Raw_df):
     """
@@ -515,6 +517,58 @@ def calculate_best_and_worst_hedge_generalized(trade_label, Sigma_Raw_df):
     # Return the individual best/worst series AND the full DataFrame
     return best_hedge, worst_hedge, results_df
 
+# --- NEW FACTOR-BASED HEDGING LOGIC (Section 8) ---
+
+def calculate_factor_sensitivities(loadings_df_gen, pc_count):
+    """
+    Calculates the Standardized Sensitivity (Beta) of every derivative to the first three 
+    principal components (Level, Slope, Curvature). This uses the standardized loadings L_D 
+    from the generalized regression (Section 7).
+    """
+    if loadings_df_gen.empty:
+        return pd.DataFrame()
+
+    # Define the factor mapping based on the first 3 PCs
+    pc_map = {
+        'PC1': 'Level (Whole Curve Shift)', 
+        'PC2': 'Slope (Steepening/Flattening)', 
+        'PC3': 'Curvature (Fly Risk)'
+    }
+    
+    # Only use up to the number of available PCs, or 3, whichever is smaller
+    available_pcs = loadings_df_gen.columns.intersection(list(pc_map.keys()))
+    
+    # Filter the generalized loadings L_D for the relevant PCs
+    factor_sensitivities = loadings_df_gen.filter(items=available_pcs.tolist(), axis=1).copy()
+    
+    # Rename columns for clarity in the output
+    factor_sensitivities.columns = [pc_map[col] for col in available_pcs]
+    
+    # The values in this table represent the standardized beta (sensitivity) 
+    # to the standardized PC score. We can treat these as the factor exposures.
+    return factor_sensitivities
+
+def calculate_factor_hedge_ratio(trade_label, hedge_label, factor_sensitivities_df, factor_name):
+    """
+    Calculates the hedge ratio k_factor to neutralize the factor exposure.
+    k_factor = Trade_Exposure / Hedge_Exposure
+    """
+    if trade_label not in factor_sensitivities_df.index or hedge_label not in factor_sensitivities_df.index:
+        return None, "One or both instruments not found in factor sensitivities."
+        
+    if factor_name not in factor_sensitivities_df.columns:
+        return None, f"Factor '{factor_name}' not found."
+        
+    Trade_Exposure = factor_sensitivities_df.loc[trade_label, factor_name]
+    Hedge_Exposure = factor_sensitivities_df.loc[hedge_label, factor_name]
+    
+    if abs(Hedge_Exposure) < 1e-9: # Avoid division by near-zero
+        return None, "Hedge instrument has negligible sensitivity to this factor."
+        
+    # k_factor is the ratio of sensitivities
+    k_factor = Trade_Exposure / Hedge_Exposure
+    
+    return k_factor, None
 
 # --- Streamlit Application Layout ---
 
@@ -536,6 +590,10 @@ expiry_file = st.sidebar.file_uploader(
 # Initialize dataframes
 price_df = load_data(price_file)
 expiry_df = load_data(expiry_file)
+
+# Placeholder for L_D Loadings, calculated in Section 7 and used in Section 8
+loadings_df_gen = pd.DataFrame()
+
 
 if price_df is not None and expiry_df is not None:
     # --- Date Range Filter ---
@@ -598,11 +656,11 @@ if not price_df_filtered.empty:
     spreads_3M_df = calculate_k_step_spreads(analysis_curve_df, 1)
     butterflies_3M_df = calculate_k_step_butterflies(analysis_curve_df, 1)
     
-    # 6M (k=2) - Requested sections 5.4, 5.5
+    # 6M (k=2)
     spreads_6M_df = calculate_k_step_spreads(analysis_curve_df, 2)
     butterflies_6M_df = calculate_k_step_butterflies(analysis_curve_df, 2)
     
-    # 12M (k=4) - Requested sections 5.6, 5.7
+    # 12M (k=4)
     spreads_12M_df = calculate_k_step_spreads(analysis_curve_df, 4)
     butterflies_12M_df = calculate_k_step_butterflies(analysis_curve_df, 4)
     
@@ -991,7 +1049,7 @@ if not price_df_filtered.empty:
             st.info("Not enough contracts (need 9 or more) to calculate and plot 12M butterfly snapshot.")
 
 
-        # --------------------------- 6. PCA-Based Hedging Strategy (3M Spreads ONLY) ---------------------------
+        # --------------------------- 6. PCA-Based Hedging Strategy (3M Spreads ONLY - Original Section) ---------------------------
         st.header("6. PCA-Based Hedging Strategy (3M Spreads ONLY - Original Section)")
         st.markdown(f"""
             This section calculates the **Minimum Variance Hedge Ratio ($k^*$ )** for a chosen **3M spread** trade, using *another 3M spread* as the hedge. The calculation uses the **Covariance Matrix** of the **3M spreads**, which is **reconstructed using the selected {pc_count} Principal Components**.
@@ -1058,8 +1116,8 @@ if not price_df_filtered.empty:
                 st.warning("3M Hedging calculation failed. Check if enough historical data is available after filtering.")
 
 
-        # --------------------------- 7. PCA-Based Generalized Hedging Strategy (NEW) ---------------------------
-        st.header("7. PCA-Based Generalized Hedging Strategy (All Derivatives)")
+        # --------------------------- 7. PCA-Based Generalized Hedging Strategy (Minimum Variance) ---------------------------
+        st.header("7. PCA-Based Generalized Hedging Strategy (Minimum Variance)")
         st.markdown(f"""
             This section calculates the **Minimum Variance Hedge Ratio ($k^*$ )** for *any* derivative trade, using *any* other derivative as a hedge. The calculation is based on the **full covariance matrix** of all derivatives, which is **reconstructed using the selected {pc_count} Principal Components** derived from the 3M Spreads.
             
@@ -1067,7 +1125,7 @@ if not price_df_filtered.empty:
             * **Hedge:** Short $k^*$ units of the hedging instrument.
         """)
         
-        # --- HEDGING DATA PREPARATION (NEW) ---
+        # --- HEDGING DATA PREPARATION ---
         # 1. Combine all historical derivative time series into one DataFrame
         all_derivatives_list = [
             spreads_3M_df.rename(columns=lambda x: f"3M Spread: {x}"),
@@ -1080,8 +1138,8 @@ if not price_df_filtered.empty:
         
         all_derivatives_df = pd.concat(all_derivatives_list, axis=1)
 
-        # 2. Calculate the Generalized Covariance Matrix
-        Sigma_Raw_df, all_derivatives_aligned = calculate_derivatives_covariance_generalized(
+        # 2. Calculate the Generalized Covariance Matrix AND Loadings L_D
+        Sigma_Raw_df, all_derivatives_aligned, loadings_df_gen = calculate_derivatives_covariance_generalized(
             all_derivatives_df, scores, eigenvalues, pc_count
         )
         
@@ -1137,6 +1195,103 @@ if not price_df_filtered.empty:
                 
             else:
                 st.warning("Generalized Hedging calculation failed for the selected trade. Check if enough historical data is available after filtering.")
+
+
+        # --------------------------- 8. PCA-Based Factor Hedging Strategy (NEW SECTION) ---------------------------
+        st.header("8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging)")
+        st.markdown(f"""
+            This section calculates the hedge ratio ($k_{{factor}}$) required to **completely neutralize** the exposure of a chosen trade to a specific **macro risk factor** (Level, Slope, or Curvature). This is a purely factor-driven hedge, ignoring residual (diversifiable) risk, and is useful for expressing a pure view on a specific curve movement.
+            
+            * **Factor View:** Hedge is used to remove sensitivity to the selected factor.
+            * **Trade:** Long 1 unit of the selected instrument.
+            * **Hedge:** Short $k_{{factor}}$ units of the hedging instrument.
+            * **Formula:** $k_{{factor}} = \\frac{{\\text{{Sensitivity}}(\\text{{Trade}}, \\text{{Factor}})}}{{\\text{{Sensitivity}}(\\text{{Hedge}}, \\text{{Factor}})}}$
+        """)
+        
+        if loadings_df_gen.empty or loadings_df_gen.shape[0] < 2:
+             st.warning("Factor sensitivity data is unavailable. Please ensure Section 7 successfully calculated the loadings.")
+        else:
+            
+            # 1. Calculate the sensitivities from the generalized loadings L_D
+            factor_sensitivities_df = calculate_factor_sensitivities(loadings_df_gen, pc_count)
+            
+            if factor_sensitivities_df.empty:
+                 st.error("Factor sensitivity calculation failed.")
+                 st.stop()
+                 
+            # 2. Setup the selection boxes
+            col_trade_sel, col_hedge_sel, col_factor_sel = st.columns(3)
+            
+            instrument_options = factor_sensitivities_df.index.tolist()
+            factor_options = factor_sensitivities_df.columns.tolist()
+
+            with col_trade_sel:
+                trade_selection_factor = st.selectbox(
+                    "1. Select Trade Instrument (Long 1 unit):", 
+                    options=instrument_options,
+                    index=0,
+                    key='trade_instrument_factor'
+                )
+            with col_hedge_sel:
+                # Exclude the trade instrument itself from the hedge candidates
+                hedge_options = [c for c in instrument_options if c != trade_selection_factor]
+                hedge_selection_factor = st.selectbox(
+                    "2. Select Hedge Instrument:", 
+                    options=hedge_options,
+                    index=0 if hedge_options else None,
+                    key='hedge_instrument_factor'
+                )
+            with col_factor_sel:
+                factor_selection = st.selectbox(
+                    "3. Select Factor to Neutralize:", 
+                    options=factor_options,
+                    index=0,
+                    key='factor_select'
+                )
+
+            st.markdown("---")
+            
+            # 4. Calculate Hedge Ratio
+            if trade_selection_factor and hedge_selection_factor and factor_selection:
+                k_factor, error_msg = calculate_factor_hedge_ratio(
+                    trade_selection_factor, 
+                    hedge_selection_factor, 
+                    factor_sensitivities_df, 
+                    factor_selection
+                )
+
+                if k_factor is not None:
+                    st.success(f"**Factor Hedge Result**")
+                    st.markdown(f"""
+                        To neutralize the **{factor_selection}** risk (i.e., making the portfolio $\\beta_{{\\text{{Factor}}}} = 0$):
+                        
+                        * **Trade:** Long 1 unit of **{trade_selection_factor}**
+                        * **Hedge Action:** Short **{k_factor:.4f}** units of **{hedge_selection_factor}**
+                    """)
+                    
+                    # Display the sensitivities that led to the ratio
+                    col_trade_sens, col_hedge_sens = st.columns(2)
+                    with col_trade_sens:
+                        st.info(f"Trade Sensitivity to {factor_selection}: **{factor_sensitivities_df.loc[trade_selection_factor, factor_selection]:.4f}**")
+                    with col_hedge_sens:
+                        st.info(f"Hedge Sensitivity to {factor_selection}: **{factor_sensitivities_df.loc[hedge_selection_factor, factor_selection]:.4f}**")
+                        
+                    st.markdown("---")
+                    
+                    # 5. Display Full Sensitivities Table
+                    st.subheader(f"Factor Sensitivities (Standardized Beta) Table")
+                    st.markdown("The values below are the standardized exposures of each instrument to the three main risk factors. A positive value means the instrument moves in the same direction as the factor.")
+                    
+                    st.dataframe(
+                        factor_sensitivities_df.style.format("{:.4f}"),
+                        use_container_width=True
+                    )
+
+                else:
+                    st.error(f"Factor hedge calculation failed: {error_msg}")
+            else:
+                 st.info("Please ensure both trade and hedge instruments are selected.")
+
 
     else:
         st.error("PCA failed. Please check your data quantity and quality.")
