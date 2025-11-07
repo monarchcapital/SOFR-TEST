@@ -228,7 +228,16 @@ def _reconstruct_derivative(original_df, reconstructed_prices, derivative_type='
         try:
             if derivative_type == 'spread':
                 # Spread: C_i - C_{i+k}. Label is C_i-C_{i+k} (e.g., Z25-M26)
-                c1, c_long = label.split('-')
+                # Handle unique prefixed labels
+                if ':' in label:
+                    # Remove prefix like '3M Spread: ' or '6M Spread: '
+                    core_label = label.split(': ')[1] 
+                else:
+                    core_label = label
+                    
+                c1, c_long = core_label.split('-')
+                
+                # Use the core label without prefix for price lookup, but must append ' (PCA)'
                 reconstructed_data[label + ' (PCA)'] = (
                     reconstructed_prices_aligned[c1 + ' (PCA)'] - reconstructed_prices_aligned[c_long + ' (PCA)']
                 )
@@ -237,8 +246,13 @@ def _reconstruct_derivative(original_df, reconstructed_prices, derivative_type='
                 # Fly: C_i - 2 * C_{i+k} + C_{i+2k}. Label format: C_i-2xC_{i+k}+C_{i+2k}
                 # Example: Z25-2xM26+Z26
                 
+                if ':' in label:
+                    core_label = label.split(': ')[1] 
+                else:
+                    core_label = label
+                    
                 # 1. Split on the first '-' to get ['C_i', '2xC_{i+k}+C_{i+2k}']
-                parts = label.split('-', 1) 
+                parts = core_label.split('-', 1) 
                 c1 = parts[0] # C_i
                 
                 # 2. Split the second part by '+' to get ['2xC_{i+k}', 'C_{i+2k}']
@@ -285,16 +299,22 @@ def reconstruct_prices_and_derivatives(analysis_curve_df, reconstructed_spreads_
     reconstructed_prices_df = pd.DataFrame(index=analysis_curve_df_aligned.index)
     reconstructed_prices_df[nearest_contract_label + ' (PCA)'] = nearest_contract_original # Anchor
     
+    # The 3M spreads used for PCA reconstruction DO NOT have the '3M Spread: ' prefix
+    spreads_3M_df_no_prefix = spreads_3M_df.copy()
+
     # Reconstruct all subsequent contracts using the reconstructed 3M spreads (k=1)
     for i in range(1, len(analysis_curve_df_aligned.columns)):
         prev_maturity = analysis_curve_df_aligned.columns[i-1]
         current_maturity = analysis_curve_df_aligned.columns[i]
-        spread_label = f"{prev_maturity}-{current_maturity}" # This is always the 3M spread label
+        spread_label_no_prefix = f"{prev_maturity}-{current_maturity}" # This is always the 3M spread label
+
+        # Check in the reconstructed 3M spreads DataFrame (which has the prefix)
+        spread_label_reconstructed = f"3M Spread: {spread_label_no_prefix}"
         
-        if spread_label in reconstructed_spreads_3M_df.columns:
+        if spread_label_no_prefix in reconstructed_spreads_3M_df.columns:
             # P_i = P_i-1 (PCA) - S_i-1,i (PCA)
             reconstructed_prices_df[current_maturity + ' (PCA)'] = (
-                reconstructed_prices_df[prev_maturity + ' (PCA)'] - reconstructed_spreads_3M_df[spread_label]
+                reconstructed_prices_df[prev_maturity + ' (PCA)'] - reconstructed_spreads_3M_df[spread_label_no_prefix]
             )
         else:
             # Fallback if the 3M spread is missing for that contract roll
@@ -307,16 +327,27 @@ def reconstruct_prices_and_derivatives(analysis_curve_df, reconstructed_spreads_
 
     # --- 2. Reconstruct Derivatives from Reconstructed Prices ---
     
-    historical_spreads_3M = _reconstruct_derivative(spreads_3M_df, reconstructed_prices_df, derivative_type='spread')
-    historical_butterflies_3M = _reconstruct_derivative(butterflies_3M_df, reconstructed_prices_df, derivative_type='fly')
+    # NOTE: The input derivative DFs (spreads_3M_df, etc.) must now contain the prefixes
+    # for the helper function _reconstruct_derivative to work correctly with the labels.
     
-    historical_spreads_6M = _reconstruct_derivative(spreads_6M_df, reconstructed_prices_df, derivative_type='spread')
-    historical_butterflies_6M = _reconstruct_derivative(butterflies_6M_df, reconstructed_prices_df, derivative_type='fly')
+    # Prepare derivative DFs with prefixes for _reconstruct_derivative to correctly rename columns
+    spreads_3M_df_prefixed = spreads_3M_df_no_prefix.rename(columns=lambda x: f"3M Spread: {x}")
+    butterflies_3M_df_prefixed = butterflies_3M_df.rename(columns=lambda x: f"3M Fly: {x}")
+    spreads_6M_df_prefixed = spreads_6M_df.rename(columns=lambda x: f"6M Spread: {x}")
+    butterflies_6M_df_prefixed = butterflies_6M_df.rename(columns=lambda x: f"6M Fly: {x}")
+    spreads_12M_df_prefixed = spreads_12M_df.rename(columns=lambda x: f"12M Spread: {x}")
+    butterflies_12M_df_prefixed = butterflies_12M_df.rename(columns=lambda x: f"12M Fly: {x}")
     
-    historical_spreads_12M = _reconstruct_derivative(spreads_12M_df, reconstructed_prices_df, derivative_type='spread')
-    historical_butterflies_12M = _reconstruct_derivative(butterflies_12M_df, reconstructed_prices_df, derivative_type='fly')
+    historical_spreads_3M = _reconstruct_derivative(spreads_3M_df_prefixed, reconstructed_prices_df, derivative_type='spread')
+    historical_butterflies_3M = _reconstruct_derivative(butterflies_3M_df_prefixed, reconstructed_prices_df, derivative_type='fly')
     
-    return historical_outrights, historical_spreads_3M, historical_butterflies_3M, historical_spreads_6M, historical_butterflies_6M, historical_spreads_12M, historical_butterflies_12M
+    historical_spreads_6M = _reconstruct_derivative(spreads_6M_df_prefixed, reconstructed_prices_df, derivative_type='spread')
+    historical_butterflies_6M = _reconstruct_derivative(butterflies_6M_df_prefixed, reconstructed_prices_df, derivative_type='fly')
+    
+    historical_spreads_12M = _reconstruct_derivative(spreads_12M_df_prefixed, reconstructed_prices_df, derivative_type='spread')
+    historical_butterflies_12M = _reconstruct_derivative(butterflies_12M_df_prefixed, reconstructed_prices_df, derivative_type='fly')
+    
+    return historical_outrights, historical_spreads_3M, historical_butterflies_3M, historical_spreads_6M, historical_butterflies_6M, historical_spreads_12M, historical_butterflies_12M, spreads_3M_df_no_prefix
 
 
 # --- ORIGINAL HEDGING LOGIC (Section 6) ---
@@ -349,6 +380,7 @@ def calculate_best_and_worst_hedge_3M(trade_label, loadings_df, eigenvalues, pc_
     hedge for a given 3M spread trade using the reconstructed covariance matrix, 
     and returns the full results DataFrame as well. (Section 6 - 3M Spreads only)
     """
+    # NOTE: trade_label here is a simple contract spread label (e.g., Z25-H26)
     if trade_label not in loadings_df.index:
         return None, None, None
         
@@ -522,8 +554,7 @@ def calculate_best_and_worst_hedge_generalized(trade_label, Sigma_Raw_df):
 def calculate_factor_sensitivities(loadings_df_gen, pc_count):
     """
     Calculates the Standardized Sensitivity (Beta) of every derivative to the first three 
-    principal components (Level, Slope, Curvature). This uses the standardized loadings L_D 
-    from the generalized regression (Section 7).
+    principal components (Level, Slope, Curvature).
     """
     if loadings_df_gen.empty:
         return pd.DataFrame()
@@ -544,63 +575,81 @@ def calculate_factor_sensitivities(loadings_df_gen, pc_count):
     # Rename columns for clarity in the output
     factor_sensitivities.columns = [pc_map[col] for col in available_pcs]
     
-    # The values in this table represent the standardized beta (sensitivity) 
-    # to the standardized PC score. We can treat these as the factor exposures.
     return factor_sensitivities
 
-def find_optimal_factor_hedge(trade_label, factor_sensitivities_df, factor_name):
+def calculate_all_factor_hedges(trade_label, factor_name, factor_sensitivities_df, Sigma_Raw_df):
     """
-    Finds the instrument (excluding the trade itself) with the highest 
-    absolute sensitivity to the specified factor, which serves as the optimal hedge.
+    Calculates the Factor Hedge Ratio and the resulting Residual Volatility for all potential 
+    hedge instruments, for a specified factor.
     
-    Returns: optimal_hedge_label, optimal_hedge_sensitivity, error_msg
+    Inputs:
+    - trade_label: The derivative being hedged.
+    - factor_name: The factor (Level, Slope, Curvature) to neutralize.
+    - factor_sensitivities_df: Loadings (Betas) of instruments to factors (L_D).
+    - Sigma_Raw_df: The full reconstructed raw covariance matrix of all derivatives.
+    
+    Returns: DataFrame of results sorted by Residual Volatility.
     """
+    if trade_label not in factor_sensitivities_df.index:
+        return pd.DataFrame(), f"Trade instrument '{trade_label}' not found in sensitivities."
     if factor_name not in factor_sensitivities_df.columns:
-        return None, 0.0, "Factor column not found."
-    
-    # 1. Calculate absolute sensitivity and filter out the trade instrument
-    # Use .abs() on the Series containing sensitivities to the specific factor
-    abs_sensitivities = factor_sensitivities_df[factor_name].abs()
-    
-    # --- CRITICAL FIX: Ensure the trade is removed from candidates ---
-    hedge_candidates_abs = abs_sensitivities.drop(trade_label, errors='ignore')
-    
-    if hedge_candidates_abs.empty:
-        # Check if the trade was the only one, or if drop failed silently
-        if trade_label in abs_sensitivities.index and len(abs_sensitivities) > 1:
-             return None, 0.0, f"Error: Failed to exclude trade '{trade_label}' from candidates. Check label consistency."
-        return None, 0.0, "No other instruments available to use as a hedge."
+        return pd.DataFrame(), f"Factor '{factor_name}' not found."
+    if trade_label not in Sigma_Raw_df.index:
+        return pd.DataFrame(), f"Trade instrument '{trade_label}' not found in covariance matrix."
 
-    # 2. Find the instrument with the maximum absolute sensitivity
-    optimal_hedge_label = hedge_candidates_abs.idxmax()
+    results = []
     
-    # 3. Get the raw sensitivity (not absolute) of the optimal hedge for the ratio calculation
-    optimal_hedge_sensitivity = factor_sensitivities_df.loc[optimal_hedge_label, factor_name]
-    
-    return optimal_hedge_label, optimal_hedge_sensitivity, None
-
-
-def calculate_factor_hedge_ratio(trade_label, hedge_label, factor_sensitivities_df, factor_name):
-    """
-    Calculates the hedge ratio k_factor to neutralize the factor exposure.
-    k_factor = Trade_Exposure / Hedge_Exposure
-    """
-    if trade_label not in factor_sensitivities_df.index or hedge_label not in factor_sensitivities_df.index:
-        return None, "One or both instruments not found in factor sensitivities."
-        
-    if factor_name not in factor_sensitivities_df.columns:
-        return None, f"Factor '{factor_name}' not found."
-        
     Trade_Exposure = factor_sensitivities_df.loc[trade_label, factor_name]
-    Hedge_Exposure = factor_sensitivities_df.loc[hedge_label, factor_name]
+    Var_Trade = Sigma_Raw_df.loc[trade_label, trade_label] # Var(T)
     
-    if abs(Hedge_Exposure) < 1e-9: # Avoid division by near-zero
-        return None, "Hedge instrument has negligible sensitivity to this factor. Select a different factor or trade."
+    # Iterate through all other derivatives as potential hedges
+    potential_hedges = [col for col in Sigma_Raw_df.columns if col != trade_label]
+
+    for hedge_instrument in potential_hedges:
+        try:
+            Hedge_Exposure = factor_sensitivities_df.loc[hedge_instrument, factor_name]
+            Var_Hedge = Sigma_Raw_df.loc[hedge_instrument, hedge_instrument] # Var(H)
+            Cov_TH = Sigma_Raw_df.loc[trade_label, hedge_instrument]        # Cov(T, H)
+
+            # 1. Calculate Factor Hedge Ratio (k_factor)
+            if abs(Hedge_Exposure) < 1e-9:
+                k_factor = 0.0
+                Residual_Volatility_BPS = np.nan # Cannot neutralize factor with zero-exposure hedge
+            else:
+                # k_factor is the ratio of sensitivities: k = Beta_T / Beta_H
+                k_factor = Trade_Exposure / Hedge_Exposure
+                
+                # 2. Calculate Residual Variance of the hedged portfolio (Var(T - k*H))
+                # Var(P) = Var(T) + k^2 Var(H) - 2k Cov(T, H)
+                Residual_Variance = Var_Trade + (k_factor**2 * Var_Hedge) - (2 * k_factor * Cov_TH)
+                Residual_Variance = max(0, Residual_Variance) 
+                
+                # 3. Residual Volatility (Score) in BPS
+                Residual_Volatility_BPS = np.sqrt(Residual_Variance) * 10000
+                
+            results.append({
+                'Hedge Instrument': hedge_instrument,
+                'Trade Sensitivity': Trade_Exposure,
+                'Hedge Sensitivity': Hedge_Exposure,
+                f'Factor Hedge Ratio (k_factor)': k_factor,
+                'Residual Volatility (BPS)': Residual_Volatility_BPS
+            })
+            
+        except Exception as e:
+            # Handle case where covariance or sensitivity might be missing (shouldn't happen if alignment is correct)
+            # print(f"Error processing hedge {hedge_instrument}: {e}")
+            continue
+
+    if not results:
+        return pd.DataFrame(), "No valid hedge candidates found."
         
-    # k_factor is the ratio of sensitivities
-    k_factor = Trade_Exposure / Hedge_Exposure
+    results_df = pd.DataFrame(results)
     
-    return k_factor, None
+    # Sort by Residual Volatility (BPS) to show the most effective hedges first
+    results_df = results_df.sort_values(by='Residual Volatility (BPS)', ascending=True, na_position='last')
+    
+    return results_df, None
+
 
 # --- Streamlit Application Layout ---
 
@@ -623,9 +672,10 @@ expiry_file = st.sidebar.file_uploader(
 price_df = load_data(price_file)
 expiry_df = load_data(expiry_file)
 
-# Placeholder for L_D Loadings, calculated in Section 7 and used in Section 8
+# Placeholder for L_D Loadings and Sigma_Raw_df, calculated in Section 7 and used in Section 8
 loadings_df_gen = pd.DataFrame()
-
+Sigma_Raw_df = pd.DataFrame()
+spreads_3M_df_no_prefix = pd.DataFrame() # Also need this for Section 6 if price_df is not None
 
 if price_df is not None and expiry_df is not None:
     # --- Date Range Filter ---
@@ -685,7 +735,7 @@ if not price_df_filtered.empty:
     st.header("1. Data Derivatives Check (Contracts relevant to selected Analysis Date)")
     
     # 3M (k=1) - Used for PCA input
-    spreads_3M_df = calculate_k_step_spreads(analysis_curve_df, 1)
+    spreads_3M_df_raw = calculate_k_step_spreads(analysis_curve_df, 1) # No prefix here
     butterflies_3M_df = calculate_k_step_butterflies(analysis_curve_df, 1)
     
     # 6M (k=2)
@@ -697,15 +747,15 @@ if not price_df_filtered.empty:
     butterflies_12M_df = calculate_k_step_butterflies(analysis_curve_df, 4)
     
     st.markdown("##### 3-Month Outright Spreads (k=1, e.g., Z25-H26)")
-    st.dataframe(spreads_3M_df.head(5))
+    st.dataframe(spreads_3M_df_raw.head(5))
     
-    if spreads_3M_df.empty:
+    if spreads_3M_df_raw.empty:
         st.warning("3M Spreads could not be calculated. Need at least two contracts in the analysis curve.")
         st.stop()
         
     # 4. Perform PCA
     # 4a. PCA on 3M Spreads (Standard Method - Used for Fair Curve Reconstruction & Hedging)
-    loadings_spread, explained_variance_ratio, eigenvalues, scores, spreads_3M_df_clean = perform_pca(spreads_3M_df)
+    loadings_spread, explained_variance_ratio, eigenvalues, scores, spreads_3M_df_clean = perform_pca(spreads_3M_df_raw)
     
     # 4b. PCA on Outright Prices (User Requested Independent Method - Unstandardized/Covariance)
     loadings_outright_direct, explained_variance_outright_direct = perform_pca_on_prices(analysis_curve_df)
@@ -851,6 +901,7 @@ if not price_df_filtered.empty:
         
         reconstructed_scaled = scores_used @ loadings_used.T
         
+        # NOTE: The reconstructed spreads DF still uses the simple, unprefixed labels
         reconstructed_spreads_3M = pd.DataFrame(
             reconstructed_scaled * data_std.values + data_mean.values,
             index=spreads_3M_df_clean.index, 
@@ -858,8 +909,8 @@ if not price_df_filtered.empty:
         )
 
         # 2. Reconstruct Outright Prices and ALL Derivatives (3M, 6M, 12M)
-        historical_outrights_df, historical_spreads_3M_df, historical_butterflies_3M_df, historical_spreads_6M_df, historical_butterflies_6M_df, historical_spreads_12M_df, historical_butterflies_12M_df = \
-            reconstruct_prices_and_derivatives(analysis_curve_df, reconstructed_spreads_3M, spreads_3M_df, spreads_6M_df, butterflies_3M_df, butterflies_6M_df, spreads_12M_df, butterflies_12M_df)
+        historical_outrights_df, historical_spreads_3M_df, historical_butterflies_3M_df, historical_spreads_6M_df, historical_butterflies_6M_df, historical_spreads_12M_df, historical_butterflies_12M_df, spreads_3M_df_no_prefix = \
+            reconstruct_prices_and_derivatives(analysis_curve_df, reconstructed_spreads_3M, spreads_3M_df_raw, spreads_6M_df, butterflies_3M_df, butterflies_6M_df, spreads_12M_df, butterflies_12M_df)
 
         
         # --- HELPER FUNCTION FOR PLOTTING SNAPSHOTS (defined here to use local variables) ---
@@ -877,6 +928,7 @@ if not price_df_filtered.empty:
                 
                 # 2. Rename column (which is the datetime key) and clean the index labels
                 snapshot_original.columns = ['Original']
+                # Index labels contain the full prefix and the '(Original)' suffix (e.g., '3M Spread: Z25-H26 (Original)')
                 snapshot_original.index = snapshot_original.index.str.replace(r'\s\(Original\)$', '', regex=True)
 
                 snapshot_pca.columns = ['PCA Fair']
@@ -1094,9 +1146,8 @@ if not price_df_filtered.empty:
             st.warning("Need at least two 3M spreads to analyze hedging.")
         else:
             
-            default_trade = 'Z25-H26'
-            if default_trade not in spreads_3M_df_clean.columns:
-                default_trade = spreads_3M_df_clean.columns[0]
+            # NOTE: trade_selection_3m uses the simple contract spread label (e.g., Z25-H26)
+            default_trade = spreads_3M_df_clean.columns[0]
                 
             trade_selection_3m = st.selectbox(
                 "Select Trade Spread (Long 1 unit):", 
@@ -1157,11 +1208,11 @@ if not price_df_filtered.empty:
             * **Hedge:** Short $k^*$ units of the hedging instrument.
         """)
         
-        # --- HEDGING DATA PREPARATION ---
+        # --- HEDGING DATA PREPARATION (FOR SECTIONS 7 & 8) ---
         # 1. Combine all historical derivative time series into one DataFrame
-        # **CORRECTION: Ensure all derivatives have unique, explicit prefixes for Section 8 compatibility**
+        # **CRITICAL: Ensure all derivatives have unique, explicit prefixes**
         all_derivatives_list = [
-            spreads_3M_df.rename(columns=lambda x: f"3M Spread: {x}"),
+            spreads_3M_df_raw.rename(columns=lambda x: f"3M Spread: {x}"), # Uses raw spread DF (no prefix)
             butterflies_3M_df.rename(columns=lambda x: f"3M Fly: {x}"),
             spreads_6M_df.rename(columns=lambda x: f"6M Spread: {x}"),
             butterflies_6M_df.rename(columns=lambda x: f"6M Fly: {x}"),
@@ -1187,7 +1238,7 @@ if not price_df_filtered.empty:
                 key='trade_instrument_select_gen'
             )
             
-            # CALL TO THE GENERALIZED FUNCTION
+            # CALL TO THE GENERALIZED MINIMUM VARIANCE FUNCTION
             best_hedge_data_gen, worst_hedge_data_gen, all_results_df_full_gen = calculate_best_and_worst_hedge_generalized(
                 trade_selection_gen, Sigma_Raw_df
             )
@@ -1213,7 +1264,7 @@ if not price_df_filtered.empty:
                     """)
                     
                 st.markdown("---")
-                st.markdown("###### Detailed Hedging Results (All Derivatives as Hedge Candidates)")
+                st.markdown("###### Detailed Hedging Results (All Derivatives as Hedge Candidates - Sorted by Minimum Variance)")
                 
                 # Use the full results DataFrame directly and sort it for display
                 all_results_df_full_gen = all_results_df_full_gen.sort_values(by='Residual Volatility (BPS)', ascending=True)
@@ -1227,35 +1278,29 @@ if not price_df_filtered.empty:
                 )
                 
             else:
-                st.warning("Generalized Hedging calculation failed for the selected trade. Check if enough historical data is available after filtering.")
+                st.warning("Generalized Minimum Variance Hedging calculation failed for the selected trade. Check if enough historical data is available after filtering.")
 
 
-        # --------------------------- 8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging - CORRECTED) ---------------------------
+        # --------------------------- 8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging - REWRITTEN) ---------------------------
         st.header("8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging)")
         st.markdown(f"""
-            This section calculates the hedge ratio ($k_{{factor}}$) required to **completely neutralize** the exposure of a chosen trade to a specific **macro risk factor** (Level, Slope, or Curvature). The **optimal hedge instrument** is **automatically selected** based on having the **highest absolute sensitivity** to the chosen factor, which ensures the $k_{{factor}}$ ratio is minimized for maximum hedge efficiency.
+            This strategy selects a hedge instrument to neutralize a trade's exposure to a **single, specific risk factor** (Level, Slope, or Curvature). The **Hedge Ratio ($k_{{factor}}$)** is determined purely by the ratio of sensitivities (factor exposures) of the trade and the hedge. The table below shows the calculated hedge ratio and the **Residual Volatility (BPS)** *after* applying that factor hedge, calculated using the full $\\Sigma_{{\\text{{Raw}}}}$ covariance matrix.
             
-            * **Factor View:** Hedge is used to remove sensitivity to the selected factor.
-            * **Trade:** Long 1 unit of the selected instrument.
-            * **Hedge:** Short $k_{{factor}}$ units of the **automatically selected optimal instrument**.
-            * **Formula:** $k_{{factor}} = \\frac{{\\text{{Sensitivity}}(\\text{{Trade}}, \\text{{Factor}})}}{{\\text{{Sensitivity}}(\\text{{Optimal Hedge}}, \\text{{Factor}})}}$
+            * **Goal:** Neutralize exposure to the selected factor.
+            * **Formula:** $k_{{factor}} = \\frac{{\\text{{Sens}}(\\text{{Trade}}, \\text{{Factor}})}}{{\\text{{Sens}}(\\text{{Hedge}}, \\text{{Factor}})}}$
+            * **Sorting:** Results are sorted by **Residual Volatility** (lowest risk remaining after factor neutralization) to find the 'best suitable' hedge.
         """)
         
-        if loadings_df_gen.empty or loadings_df_gen.shape[0] < 2:
-             st.warning("Factor sensitivity data is unavailable. Please ensure Section 7 successfully calculated the loadings.")
+        # 1. Calculate the sensitivities from the generalized loadings L_D (same as Section 7 prep)
+        factor_sensitivities_df = calculate_factor_sensitivities(loadings_df_gen, pc_count)
+            
+        if factor_sensitivities_df.empty:
+             st.error("Factor sensitivity data is unavailable. Please ensure Section 7 successfully calculated the loadings.")
         else:
             
-            # 1. Calculate the sensitivities from the generalized loadings L_D
-            factor_sensitivities_df = calculate_factor_sensitivities(loadings_df_gen, pc_count)
-            
-            if factor_sensitivities_df.empty:
-                 st.error("Factor sensitivity calculation failed.")
-                 st.stop()
-                 
             # 2. Setup the selection boxes 
             col_trade_sel, col_factor_sel = st.columns(2)
             
-            # The options list is now generated from the uniquely prefixed derivative names
             instrument_options = factor_sensitivities_df.index.tolist()
             factor_options = factor_sensitivities_df.columns.tolist()
 
@@ -1264,74 +1309,74 @@ if not price_df_filtered.empty:
                     "1. Select Trade Instrument (Long 1 unit):", 
                     options=instrument_options,
                     index=0,
-                    key='trade_instrument_factor_auto' 
+                    key='trade_instrument_factor_table' 
                 )
             with col_factor_sel:
                 factor_selection = st.selectbox(
                     "2. Select Factor to Neutralize:", 
                     options=factor_options,
                     index=0,
-                    key='factor_select_auto' 
+                    key='factor_select_table' 
                 )
-            
-            # --- Auto-Determine Optimal Hedge ---
-            optimal_hedge_label, optimal_hedge_sensitivity, search_error = find_optimal_factor_hedge(
-                trade_selection_factor, 
-                factor_sensitivities_df, 
-                factor_selection
-            )
-            
-            # The hedge selection is now a calculated value, not a user input
-            hedge_selection_factor = optimal_hedge_label
             
             st.markdown("---")
             
-            # 3. Calculate Hedge Ratio
-            if trade_selection_factor and hedge_selection_factor and factor_selection:
+            # 3. Calculate all factor hedges
+            factor_results_df, error_msg = calculate_all_factor_hedges(
+                trade_selection_factor, 
+                factor_selection, 
+                factor_sensitivities_df, 
+                Sigma_Raw_df
+            )
+            
+            # 4. Display Results
+            if error_msg:
+                st.error(f"Factor hedge calculation failed: {error_msg}")
+            elif not factor_results_df.empty:
                 
-                k_factor, error_msg = calculate_factor_hedge_ratio(
-                    trade_selection_factor, 
-                    hedge_selection_factor, 
-                    factor_sensitivities_df, 
-                    factor_selection
+                # Filter out hedges with near-zero factor sensitivity (Ratio is meaningless/too large)
+                factor_results_df_clean = factor_results_df.dropna(subset=['Residual Volatility (BPS)'])
+
+                best_hedge_row = factor_results_df_clean.iloc[0]
+                
+                st.success(f"Best Suitable Hedge for Neutralizing **{factor_selection}** Risk is **{best_hedge_row['Hedge Instrument']}**.")
+                st.markdown(f"""
+                    * **Trade Sensitivity to {factor_selection}:** `{best_hedge_row['Trade Sensitivity']:.4f}`
+                    * **Best Hedge Ratio ($k_{{factor}}$):** Short `{best_hedge_row[f'Factor Hedge Ratio (k_factor)']:.4f}` units of **{best_hedge_row['Hedge Instrument']}**.
+                    * **Lowest Residual Volatility:** `{best_hedge_row['Residual Volatility (BPS)']:.2f} BPS`
+                """)
+                
+                st.markdown("---")
+                st.markdown(f"###### Detailed Factor Hedging Results for Trade: **{trade_selection_factor}** (Sorted by Residual Volatility)")
+                
+                # Prepare table for display
+                display_df = factor_results_df.rename(columns={
+                    f'Factor Hedge Ratio (k_factor)': 'Hedge Ratio (k_factor)',
+                    'Residual Volatility (BPS)': 'Residual Volatility (BPS)'
+                })[['Hedge Instrument', 'Hedge Ratio (k_factor)', 'Residual Volatility (BPS)', 'Hedge Sensitivity']]
+                
+                # Format and display
+                st.dataframe(
+                    display_df.style.format({
+                        'Hedge Ratio (k_factor)': "{:.4f}",
+                        'Residual Volatility (BPS)': "{:.2f}",
+                        'Hedge Sensitivity': "{:.4f}",
+                    }),
+                    use_container_width=True
                 )
-
-                if k_factor is not None:
-                    # Display Success and Hedge Recommendation with explanation
-                    st.success(f"**Optimal Factor Hedge Result for Neutralizing {factor_selection}**")
-                    
-                    trade_sens = factor_sensitivities_df.loc[trade_selection_factor, factor_selection]
-                    hedge_sens = factor_sensitivities_df.loc[hedge_selection_factor, factor_selection]
-                    
-                    st.markdown(f"""
-                        The optimal hedge instrument is chosen as **{optimal_hedge_label}** because it has the **highest absolute sensitivity** to the **{factor_selection}** factor (**{abs(hedge_sens):.4f}**), making it the most efficient instrument for neutralization.
-                        
-                        * **Trade:** Long 1 unit of **{trade_selection_factor}** (Sensitivity: **{trade_sens:.4f}**)
-                        * **Hedge Action:** Short **{k_factor:.4f}** units of the **Optimal Hedge Instrument** (**{optimal_hedge_label}**)
-                    """)
-                    
-                    # Display the sensitivities that led to the ratio
-                    col_trade_sens, col_hedge_sens = st.columns(2)
-                    with col_trade_sens:
-                        st.info(f"Trade Sensitivity to {factor_selection}: **{trade_sens:.4f}**")
-                    with col_hedge_sens:
-                        st.info(f"Hedge Sensitivity to {factor_selection}: **{hedge_sens:.4f}**")
-                        
-                    st.markdown("---")
-                    
-                    # 4. Display Full Sensitivities Table
-                    st.subheader(f"Factor Sensitivities (Standardized Beta) Table")
-                    st.markdown("The values below are the standardized exposures of each instrument to the three main risk factors. A positive value means the instrument moves in the same direction as the factor.")
-                    
-                    st.dataframe(
-                        factor_sensitivities_df.style.format("{:.4f}"),
-                        use_container_width=True
-                    )
-
-                else:
-                    st.error(f"Factor hedge calculation failed: {error_msg}")
+                
             else:
-                 st.info("Please ensure a trade instrument and a factor are selected.")
+                 st.info("No hedge candidates could be successfully processed. Check if any instrument has non-zero sensitivity to the selected factor.")
+                 
+            # Display full sensitivities table as before for reference
+            st.markdown("---")
+            st.subheader(f"Factor Sensitivities (Standardized Beta) Table for Reference")
+            st.markdown("This shows the raw input exposures used for the ratio calculation.")
+            
+            st.dataframe(
+                factor_sensitivities_df.style.format("{:.4f}"),
+                use_container_width=True
+            )
 
 
     else:
