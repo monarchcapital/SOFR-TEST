@@ -596,7 +596,7 @@ if not price_df_filtered.empty:
             st.info(f"The selected **{pc_count} PCs** explain **{total_explained:.2f}%** of the total variance in the spreads.")
         
         
-        # --- Component Loadings Heatmap ---
+        # --- Component Loadings Heatmap (PC vs. Spreads) ---
         st.header("3. PC Loadings Heatmap (PC vs. Spreads)")
         st.markdown("""
             This heatmap shows the weights of the first few PCs on each **Spread**. These weights define the fundamental Level, Slope, and Curvature factors.
@@ -616,23 +616,54 @@ if not price_df_filtered.empty:
             linecolor='gray', 
             cbar_kws={'label': 'Loading Weight'}
         )
-        ax.set_title(f'Component Loadings for First {default_pc_count} Principal Components', fontsize=16)
+        ax.set_title(f'Component Loadings for First {default_pc_count} Principal Components (Spreads)', fontsize=16)
         ax.set_xlabel('Principal Component')
         ax.set_ylabel('Spread Contract')
         st.pyplot(fig)
         
-        # --- NEW SECTION: Outright Loadings Plot (User's Section 3 Request) ---
+        # ----------------------------------------------------------------------
+        # --- MODIFIED SECTION 4: Outright Loadings Plots (Heatmap + Line) ---
+        # ----------------------------------------------------------------------
         st.header("4. PC Loadings vs. Outright Contract Levels (e.g., Z25, H26)")
-        st.markdown("This plot shows the **impact** (sensitivity) of a 1-unit movement in each PC on the **outright price** of each contract.")
-        
         outright_loadings_df = calculate_outright_loadings(loadings, contract_labels)
         
         if not outright_loadings_df.empty:
+            
+            num_factors_to_plot = min(3, outright_loadings_df.shape[1]) 
+            loadings_plot = outright_loadings_df.iloc[:, :num_factors_to_plot]
+
+            # --- NEW: Heatmap of Outright Loadings (PC vs. Contracts) ---
+            st.markdown("###### Heatmap: PC Loadings vs. Outright Contracts")
+            st.markdown("""
+                This heatmap shows the raw **sensitivity** of each outright contract's price to a 1-unit move in the Level, Slope, and Curve factors.
+            """)
+            plt.style.use('default') 
+            fig_heatmap, ax_heatmap = plt.subplots(figsize=(12, 6))
+            
+            # Transpose the data so contracts are on the X-axis (maturity axis)
+            sns.heatmap(
+                loadings_plot.T, 
+                annot=True, 
+                cmap='coolwarm', 
+                fmt=".2f", 
+                linewidths=0.5, 
+                linecolor='gray', 
+                cbar_kws={'label': 'Loading Weight'},
+                vmin=-1.0, vmax=1.0 # Standardize color scale
+            )
+            ax_heatmap.set_title(f'Component Loadings for Outright Contracts (First {num_factors_to_plot} PCs)', fontsize=16)
+            ax_heatmap.set_xlabel('Contract Maturity')
+            ax_heatmap.set_ylabel('Principal Component')
+            plt.xticks(rotation=45, ha='right')
+            plt.tight_layout()
+            st.pyplot(fig_heatmap)
+            
+            # --- Existing: Line Plot of Outright Loadings ---
+            st.markdown("###### Line Plot: PC Impact on Outright Curve Shape")
+            st.markdown("This plot illustrates the **shape** of the factor curve (how the loading changes across maturities).")
+            
             plt.style.use('default') 
             fig, ax = plt.subplots(figsize=(12, 6))
-            
-            # Plot the first 3 or default number of components
-            num_factors_to_plot = min(3, outright_loadings_df.shape[1]) 
             
             for i in range(num_factors_to_plot):
                 pc_label = f'PC{i+1}'
