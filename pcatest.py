@@ -145,7 +145,7 @@ def perform_pca(data_df):
     data_df_clean = data_df.dropna()
     
     if data_df_clean.empty or data_df_clean.shape[0] < data_df_clean.shape[1]:
-        return None, None, None, None
+        return None, None, None, None, None
 
     # Standardize the data (PCA on Correlation Matrix - preferred for spread PCA)
     data_mean = data_df_clean.mean()
@@ -216,7 +216,6 @@ def _reconstruct_derivative(original_df, reconstructed_prices, derivative_type='
         return pd.DataFrame()
 
     # Align the original data index with the reconstructed prices index
-    # Use reindex instead of .loc[[analysis_dt]] to handle dates that might be missing
     valid_indices = reconstructed_prices.index.intersection(original_df.index)
     original_df_aligned = original_df.loc[valid_indices]
     reconstructed_prices_aligned = reconstructed_prices.loc[valid_indices]
@@ -326,9 +325,6 @@ def calculate_reconstructed_covariance(loadings_df, eigenvalues, spread_std_dev,
     Calculates the covariance matrix of the STANDARDIZED spreads 
     reconstructed using the first 'pc_count' PCs: Sigma_scaled = L_p Lambda_p L_p^T
     Then scales back to original spread space: Sigma = (diag(sigma)) * Sigma_scaled * (diag(sigma))
-    
-    NOTE: Since the input data to PCA was standardized, the eigenvalues (pca.explained_variance_) 
-    are the variances of the standardized scores.
     """
     n_features = loadings_df.shape[0]
     
@@ -338,16 +334,11 @@ def calculate_reconstructed_covariance(loadings_df, eigenvalues, spread_std_dev,
     
     # 2. Reconstruct the Covariance Matrix of the Standardized Data
     # Sigma_scaled = L_p * Lambda_p * L_p^T
-    # This is equivalent to: L_p @ np.diag(lambda_p) @ L_p.T
-    
     Sigma_scaled = L_p @ np.diag(lambda_p) @ L_p.T
     Sigma_scaled_df = pd.DataFrame(Sigma_scaled, index=loadings_df.index, columns=loadings_df.index)
     
     # 3. Scale back to the original spread data covariance matrix
-    # The spread PCA standardized the data: Z = (X - mu) / sigma
-    # Cov(Z) = Sigma_scaled
     # Cov(X) = diag(sigma) * Cov(Z) * diag(sigma)
-    
     Sigma = Sigma_scaled_df.values * np.outer(spread_std_dev.values, spread_std_dev.values)
     
     Sigma_df = pd.DataFrame(Sigma, index=loadings_df.index, columns=loadings_df.index)
@@ -357,10 +348,11 @@ def calculate_reconstructed_covariance(loadings_df, eigenvalues, spread_std_dev,
 def calculate_best_and_worst_hedge(trade_label, loadings_df, eigenvalues, pc_count, spreads_3M_df_clean):
     """
     Calculates the best (min residual risk) and worst (max residual risk) 
-    hedge for a given 3M spread trade using the reconstructed covariance matrix.
+    hedge for a given 3M spread trade using the reconstructed covariance matrix, 
+    and returns the full results DataFrame as well.
     """
     if trade_label not in loadings_df.index:
-        return None, None
+        return None, None, None
         
     spread_std_dev = spreads_3M_df_clean.std()
     
@@ -389,7 +381,7 @@ def calculate_best_and_worst_hedge(trade_label, loadings_df, eigenvalues, pc_cou
         else:
             k_star = Cov_TH / Var_Hedge
             
-        # 2. Residual Variance of the hedged portfolio (Var(T - k*H))
+        # 2. Residual Variance of the hedged portfolio (Var(T - k*H) = Var(T) - k*Cov(T,H))
         Residual_Variance = Var_Trade - (k_star * Cov_TH)
         
         # Should not be negative, but enforce it for safety
@@ -405,7 +397,7 @@ def calculate_best_and_worst_hedge(trade_label, loadings_df, eigenvalues, pc_cou
         })
 
     if not results:
-        return None, None
+        return None, None, None
         
     results_df = pd.DataFrame(results)
     
@@ -415,7 +407,8 @@ def calculate_best_and_worst_hedge(trade_label, loadings_df, eigenvalues, pc_cou
     # Worst hedge maximizes Residual Volatility
     worst_hedge = results_df.sort_values(by='Residual Volatility (BPS)', ascending=False).iloc[0]
     
-    return best_hedge, worst_hedge
+    # Return the individual best/worst series AND the full DataFrame
+    return best_hedge, worst_hedge, results_df
 
 
 # --- Streamlit Application Layout ---
@@ -560,9 +553,6 @@ if not price_df_filtered.empty:
             This heatmap shows the **Loadings (Eigenvectors)** of the first few PCs on each **3-Month Spread**. These weights are derived from **Standardized PCA** and represent how each spread contributes to the overall risk factors (Level, Slope, Curvature).
             
             * **Interpretation of Loadings (Weights):** The value of the loading (weight) indicates the **sensitivity** of that specific spread to the respective Principal Component. A high absolute value means the spread has historically been highly correlated with the movement of that PC factor.
-            * **Example: PC1 (Level/Parallel Shift):** Loadings are typically all **positive and uniform** across most spreads. This means that when the PC1 score increases, **all spreads tend to move in the same direction** (e.g., the entire forward curve shifts up or down in a parallel manner).
-            * **Example: PC2 (Slope/Twist):** Loadings are typically **negative for short-end spreads** and **positive for long-end spreads**. This means that when the PC2 score increases, the **short-end flattens** while the **long-end steepens**, causing the overall slope of the curve to change.
-            * **Example: PC3 (Curvature/Bow):** Loadings show a **pattern of positive/negative/positive** or similar inversions, representing a 'bowing' or 'humping' of the curve (e.g., short and long ends move in one direction while the belly moves in the opposite).
         """)
         
         plt.style.use('default') 
@@ -591,9 +581,6 @@ if not price_df_filtered.empty:
         pc1_outright_variance = explained_variance_outright_direct[0] * 100
         st.markdown(f"""
             This heatmap shows the **independent sensitivity** of each **outright contract price** to the principal components. This result is based on **Unstandardized PCA (Covariance Matrix)**, meaning the weights reflect the **absolute historical price volatility and duration** of each contract.
-            
-            * **Interpretation of Loadings (Weights):** The value here represents the raw eigenvector weight, indicating the **absolute magnitude** of historical price movement for that contract that is captured by the PC.
-            * **Example: PC1 (Non-Uniform Level):** The loadings are highly **non-uniform**, increasing significantly with maturity. The weight on the shortest contract is small, while the weight on the longest contract is largest. This happens because **long-dated contracts have historically experienced larger absolute price moves** (higher duration/volatility) than short-dated contracts, and unstandardized PCA captures this absolute movement.
             
             **PC1 Explained Variance (Absolute Price):** **{pc1_outright_variance:.2f}%**
         """)
@@ -925,7 +912,8 @@ if not price_df_filtered.empty:
                 key='trade_spread_select'
             )
             
-            best_hedge_data, worst_hedge_data = calculate_best_and_worst_hedge(
+            # CALL TO THE CORRECTED FUNCTION
+            best_hedge_data, worst_hedge_data, all_results_df_full = calculate_best_and_worst_hedge(
                 trade_selection, loadings_spread, eigenvalues, pc_count, spreads_3M_df_clean
             )
             
@@ -952,16 +940,11 @@ if not price_df_filtered.empty:
                 st.markdown("---")
                 st.markdown("###### Detailed Hedging Results (All 3M Spreads as Hedge Candidates)")
                 
-                all_results_df = calculate_best_and_worst_hedge(
-                    trade_selection, loadings_spread, eigenvalues, pc_count, spreads_3M_df_clean
-                )[0].to_frame().T.append(
-                    calculate_best_and_worst_hedge(
-                        trade_selection, loadings_spread, eigenvalues, pc_count, spreads_3M_df_clean
-                    )[1].to_frame().T
-                ).drop_duplicates().sort_values(by='Residual Volatility (BPS)', ascending=True)
+                # Use the full results DataFrame directly and sort it for display
+                all_results_df_full = all_results_df_full.sort_values(by='Residual Volatility (BPS)', ascending=True)
 
                 st.dataframe(
-                    all_results_df.style.format({
+                    all_results_df_full.style.format({
                         'Hedge Ratio (k*)': "{:.4f}",
                         'Residual Volatility (BPS)': "{:.2f}"
                     }),
