@@ -190,29 +190,30 @@ def perform_pca(data_df):
     
     return loadings, explained_variance, scores, data_df_clean
 
-# --- NEW FUNCTION FOR PCA ON PRICES ---
-def perform_pca_on_prices(price_df, contract_labels):
+# --- UPDATED FUNCTION FOR PCA ON PRICES (UNSTANDARDIZED/COVARIANCE) ---
+def perform_pca_on_prices(price_df):
     """
-    Performs PCA directly on Outright Price Levels (as requested).
+    Performs PCA directly on Outright Price Levels using the COVARIANCE MATRIX 
+    (unstandardized data). This ensures PC1 is NON-UNIFORM, reflecting absolute 
+    historical price volatility and duration, as requested.
     
     Returns: loadings_outright, explained_variance_outright
     """
-    # Drop rows with NaNs before standardization and PCA
     data_df_clean = price_df.dropna()
     
     if data_df_clean.empty or data_df_clean.shape[0] < data_df_clean.shape[1]:
         return None, None
         
-    # Standardize the data
-    data_mean = data_df_clean.mean()
-    data_std = data_df_clean.std()
-    data_scaled = (data_df_clean - data_mean) / data_std
+    # Center the data, but DO NOT scale/standardize it. 
+    # This results in PCA on the COVARIANCE MATRIX.
+    data_centered = data_df_clean - data_df_clean.mean() 
     
-    n_components = min(data_scaled.shape)
+    n_components = min(data_centered.shape)
 
     pca = PCA(n_components=n_components)
-    pca.fit(data_scaled)
+    pca.fit(data_centered)
     
+    # Loadings (Eigenvectors - the raw sensitivities)
     loadings = pd.DataFrame(
         pca.components_.T,
         columns=[f'PC{i+1}' for i in range(n_components)],
@@ -398,8 +399,8 @@ if not price_df_filtered.empty:
     # 4a. PCA on Spreads (Standard Method - Used for Fair Curve Reconstruction)
     loadings_spread, explained_variance, scores, spreads_df_clean = perform_pca(spreads_df)
     
-    # 4b. PCA on Outright Prices (User Requested Method - Used only for the 3.2 Heatmap)
-    loadings_outright_direct, explained_variance_outright_direct = perform_pca_on_prices(analysis_curve_df, contract_labels)
+    # 4b. PCA on Outright Prices (User Requested Method - Now Unstandardized)
+    loadings_outright_direct, explained_variance_outright_direct = perform_pca_on_prices(analysis_curve_df)
 
 
     if loadings_spread is not None and loadings_outright_direct is not None:
@@ -440,6 +441,7 @@ if not price_df_filtered.empty:
         st.subheader("3.1 PC Loadings Heatmap (PC vs. 3M Spreads)")
         st.markdown("""
             This heatmap shows the weights of the first few PCs on each **3-Month Spread**. These weights are used to define the Level, Slope, and Curvature factors for the Fair Curve reconstruction.
+            (Based on Standardized PCA of Spreads - Industry Standard)
         """)
         
         plt.style.use('default') 
@@ -462,12 +464,14 @@ if not price_df_filtered.empty:
         st.pyplot(fig_spread_loading)
         
         
-        # --- 3.2 Outright Loadings (User Requested Independent Method) ---
-        st.subheader("3.2 PC Loadings Heatmap (PC vs. Outright Contracts)")
-        st.markdown("""
-            This heatmap shows the **independent sensitivity** of each **outright contract price** to the principal components, as calculated by performing PCA directly on the price levels.
+        # --- 3.2 Outright Loadings (User Requested Independent Method - Now Unstandardized) ---
+        st.subheader("3.2 PC Loadings Heatmap (PC vs. Outright Contracts - Absolute Sensitivity)")
+        
+        pc1_outright_variance = explained_variance_outright_direct[0] * 100
+        st.markdown(f"""
+            This heatmap shows the **independent sensitivity** of each **outright contract price** to the principal components. This result is based on **Unstandardized PCA (Covariance Matrix)**, meaning the weights reflect **absolute price movements and duration**.
             
-            ⚠️ **WARNING:** This method can produce statistically unreliable results for the Slope (PC2) and Curvature (PC3) factors due to the **non-stationarity** of the price series. For risk management and factor modeling, the industry standard is to use the spread loadings (3.1).
+            **PC1 Explained Variance (Absolute Price):** **{pc1_outright_variance:.2f}%**
         """)
         
         fig_outright_loading, ax_outright_loading = plt.subplots(figsize=(12, 6))
@@ -481,14 +485,14 @@ if not price_df_filtered.empty:
             loadings_outright_plot, 
             annot=True, 
             cmap='coolwarm', 
-            fmt=".2f", 
+            fmt=".4f", # Increased precision to show the non-uniformity
             linewidths=0.5, 
             linecolor='gray', 
             vmin=-max_abs, 
             vmax=max_abs,
-            cbar_kws={'label': 'Relative Price Sensitivity'}
+            cbar_kws={'label': 'Absolute Price Sensitivity (Eigenvector Weight)'}
         )
-        ax_outright_loading.set_title(f'3.2 Component Loadings for First {default_pc_count} Principal Components (on Outright Contracts)', fontsize=16)
+        ax_outright_loading.set_title(f'3.2 Component Loadings for First {default_pc_count} PCs (Unstandardized Outright Prices)', fontsize=16)
         ax_outright_loading.set_xlabel('Principal Component')
         ax_outright_loading.set_ylabel('Outright Contract')
         st.pyplot(fig_outright_loading)
