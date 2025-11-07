@@ -1048,11 +1048,12 @@ if not price_df_filtered.empty:
         for i, derivative_type in enumerate(custom_derivative_types):
             historical_data = historical_derivatives_map.get(derivative_type)
             
-            # --- MODIFIED LOGIC: No explicit skip for empty derivative DataFrame.
-            # --- Instead, rely on the robust snapshot check inside the try block.
-            # --- This allows plotting even if only a few data points are calculated.
-            
             st.subheader(f"7.{starting_sub_section_num + i}. {derivative_type} Snapshot")
+            
+            # FIX FOR AttributeError: Explicitly check for None or empty DataFrame BEFORE calling .filter()
+            if historical_data is None or historical_data.empty:
+                st.warning(f"No derivative contracts could be constructed for {derivative_type} from the available curve. Skipping snapshot.")
+                continue
 
             try:
                 # 1. Select the single day's data
@@ -1066,13 +1067,10 @@ if not price_df_filtered.empty:
                 snapshot_pca.columns = ['PCA Fair']
                 snapshot_pca.index = snapshot_pca.index.str.replace(r'\s\(PCA\)$', '', regex=True)
 
-                # 3. Concatenate and drop NaNs (Crucial step: keeps only complete Original/PCA pairs)
+                # 3. Concatenate and drop NaNs
                 comparison = pd.concat([snapshot_original, snapshot_pca], axis=1).dropna()
                 
                 if comparison.empty:
-                    # Catch-all for: 
-                    # 1. Original derivative DataFrame was empty (curve too short).
-                    # 2. Or, all calculated derivatives have missing data on the analysis date.
                     st.warning(f"No complete data available for {derivative_type} on the selected analysis date. The curve may be too short or data is missing.")
                     continue
 
