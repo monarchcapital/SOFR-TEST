@@ -1,649 +1,649 @@
-# -*- coding: utf-8 -*-
-# Futures Curve PCA — Backtesting Engine
-#
-# This script performs a walk-forward validation (backtest) of the PCA-based
-# yield curve forecasting models for any futures/rates contracts provided.
-#
-# ---------------------------------------------------------------------------------
-
-import io
-import numpy as np
-import pandas as pd
 import streamlit as st
-import matplotlib.pyplot as plt
-import seaborn as sns
+import pandas as pd
+import numpy as np
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
-from scipy.interpolate import interp1d
-from statsmodels.tsa.api import VAR
-from statsmodels.tsa.arima.model import ARIMA
-from sklearn.metrics import mean_squared_error, mean_absolute_error
-import warnings
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime, date
 
-# --- Setup ---
-warnings.filterwarnings("ignore")
-# Renamed title to be asset-agnostic
-st.set_page_config(layout="wide", page_title="Futures Curve Backtesting Engine")
-sns.set_style("whitegrid")
-plt.rcParams["figure.dpi"] = 120
+# --- Configuration ---
+st.set_page_config(layout="wide", page_title="SOFR Futures PCA Analyzer")
 
-# ---------------------------------------------------------------------------------
-# CORE DATA PROCESSING FUNCTIONS
-# ---------------------------------------------------------------------------------
+# --- Helper Functions for Data Processing ---
 
-def safe_to_datetime(s):
-    """Robustly converts a string to a datetime object by trying multiple common formats."""
-    if pd.isna(s): return pd.NaT
-    formats_to_try = ['%m/%d/%Y', '%m-%d-%Y', '%d/%m/%Y', '%d-%m-%Y', '%Y/%m/%d', '%Y-%m-%d']
-    for fmt in formats_to_try:
-        try: return pd.to_datetime(s, format=fmt)
-        except (ValueError, TypeError): continue
-    return pd.to_datetime(s, errors='coerce')
+def load_data(uploaded_file):
+    """Loads CSV data into a DataFrame, adapting to price or expiry file formats."""
+    if uploaded_file is None:
+        return None
+        
+    try:
+        # Read the uploaded file content to inspect the header for format identification
+        uploaded_file.seek(0)
+        file_content = uploaded_file.getvalue().decode("utf-8")
+        uploaded_file.seek(0)
+            
+        # --- Case 1: Expiry File (EXPIRY (2).csv format: MATURITY, DATE) ---
+        if 'MATURITY,DATE' in file_content.split('\n')[0].upper():
+            df = pd.read_csv(uploaded_file, sep=',')
+            df = df.rename(columns={'MATURITY': 'Contract', 'DATE': 'ExpiryDate'})
+            # Ensure Contract is the index and Date is datetime
+            df = df.set_index('Contract')
+            df['ExpiryDate'] = pd.to_datetime(df['ExpiryDate'])
+            df.index.name = 'Contract'
+            return df
 
-def normalize_rate_input(val, unit):
-    """Converts rate input (e.g., 5.45%) to decimal fraction (e.g., 0.0545)."""
-    if pd.isna(val): return np.nan
-    v = float(val)
-    if "Percent" in unit: return v / 100.0
-    if "Basis" in unit: return v / 10000.0
-    return v
-
-def denormalize_to_percent(frac):
-    """Converts decimal fraction to percentage (e.g., 0.0545 to 5.45)."""
-    if pd.isna(frac): return np.nan
-    return 100.0 * float(frac)
-
-def np_busdays_exclusive(start_dt, end_dt, holidays_np):
-    """Calculates business days between two dates (exclusive of start, inclusive of end)."""
-    if pd.isna(start_dt) or pd.isna(end_dt): return 0
-    s = np.datetime64(pd.Timestamp(start_dt).date()) + np.timedelta64(1, "D")
-    e = np.datetime64(pd.Timestamp(end_dt).date())
-    if e < s: return 0
-    return int(np.busday_count(s, e, weekmask="1111100", holidays=holidays_np))
-
-def calculate_ttm(valuation_ts, expiry_ts, holidays_np, year_basis):
-    """Calculates Time-To-Maturity (TTM) in years based on business days and year basis."""
-    bd = np_busdays_exclusive(valuation_ts, expiry_ts, holidays_np)
-    return np.nan if bd <= 0 else bd / float(year_basis)
-
-def build_std_grid_by_rule(max_year=7.0):
-    """Defines the standard set of TTM tenors for the PCA grid (0.25Y increments up to 3Y)."""
-    # Fine grid: 0.25Y increments up to 3.0 years
-    a = list(np.round(np.arange(0.25, 3.0 + 0.001, 0.25), 2))
-    # Mid grid: 0.5Y increments up to 5.0 years
-    b = list(np.round(np.arange(3.5, 5.0 + 0.001, 0.5), 2))
-    # Long grid: 1.0Y increments up to max_year
-    c = list(np.round(np.arange(6.0, max_year + 0.001, 1.0), 2))
-    
-    tenors = np.unique(np.array(a + b + c))
-    return list(tenors[tenors <= max_year])
-
-
-def row_to_std_grid(dt, row_series, available_contracts, expiry_df, std_arr, holidays_np, year_basis, rate_unit, interp_method):
-    """Interpolates a single day's raw contract rates to the standard TTM grid."""
-    ttm_list, zero_list = [], []
-    for col in available_contracts:
-        mat_up = str(col).strip().upper()
-        if mat_up not in expiry_df.index: continue
-        exp = expiry_df.loc[mat_up, "DATE"]
-        if pd.isna(exp) or pd.Timestamp(exp).date() < dt.date(): continue
-        t = calculate_ttm(dt, exp, holidays_np, year_basis)
-        if np.isnan(t) or t <= 0: continue
-        raw_val = row_series.get(col, np.nan)
-        if pd.isna(raw_val): continue
-        r_frac = normalize_rate_input(raw_val, rate_unit)
-        zero_frac = r_frac # Assumes identity compounding for simplicity in backtest
-        ttm_list.append(t)
-        zero_list.append(denormalize_to_percent(zero_frac))
-    if len(ttm_list) > 1 and len(set(np.round(ttm_list, 12))) > 1:
-        try:
-            order = np.argsort(ttm_list)
-            f = interp1d(np.array(ttm_list)[order], np.array(zero_list)[order], kind=interp_method, bounds_error=False, fill_value=np.nan, assume_sorted=True)
-            return f(std_arr)
-        except Exception: return np.full_like(std_arr, np.nan, dtype=float)
-    return np.full_like(std_arr, np.nan, dtype=float)
-
-def build_pca_matrix(yields_df_train, expiry_df, std_arr, holidays_np, year_basis, rate_unit, interp_method):
-    """Builds the full PCA input matrix (Rates, Spreads, Flies) from interpolated data."""
-    
-    std_cols = [f"{m:.2f}Y" for m in std_arr]
-    pca_df_zeros = pd.DataFrame(np.nan, index=yields_df_train.index, columns=std_cols, dtype=float)
-    available_contracts = yields_df_train.columns
-    for dt in yields_df_train.index:
-        pca_df_zeros.loc[dt] = row_to_std_grid(
-            dt, yields_df_train.loc[dt], available_contracts, expiry_df,
-            std_arr, holidays_np, year_basis, rate_unit, interp_method
+        # --- Case 2: Price File (sofr rates.csv format: Date as index) ---
+        df = pd.read_csv(
+            uploaded_file, 
+            index_col=0, 
+            parse_dates=True,
+            date_format='%Y-%m-%d' # Assuming standard date format
         )
+        # Drop any columns that are not numeric (e.g., if there are non-price columns)
+        df = df.select_dtypes(include=np.number)
+        return df
+
+    except Exception as e:
+        st.error(f"Error loading or parsing file: {e}")
+        return None
+
+def get_analysis_contracts(price_data, expiry_data, analysis_date):
+    """Filters price data to only include contracts that were trading on or after a given date."""
     
-    pca_df_zeros = pca_df_zeros.dropna(how='all')
-    if pca_df_zeros.empty:
-        return pd.DataFrame()
-
-    # Step 2: Calculate Spreads
-    spread_cols = [f"{std_cols[i]}-{std_cols[i-1]}" for i in range(1, len(std_cols))]
-    pca_df_spreads = pd.DataFrame(np.nan, index=pca_df_zeros.index, columns=spread_cols, dtype=float)
-    for i in range(1, len(std_cols)):
-        col_name = f"{std_cols[i]}-{std_cols[i-1]}"
-        pca_df_spreads[col_name] = pca_df_zeros[std_cols[i]] - pca_df_zeros[std_cols[i-1]]
-
-    # Step 3: Calculate Flies
-    fly_cols = [f"{std_cols[i+1]}-{std_cols[i]}-{std_cols[i-1]}" for i in range(1, len(std_cols) - 1)]
-    pca_df_flies = pd.DataFrame(np.nan, index=pca_df_zeros.index, columns=fly_cols, dtype=float)
-    for i in range(1, len(std_cols) - 1):
-        col_name = f"{std_cols[i+1]}-{std_cols[i]}-{std_cols[i-1]}"
-        pca_df_flies[col_name] = (pca_df_zeros[std_cols[i+1]] - pca_df_zeros[std_cols[i]]) - (pca_df_zeros[std_cols[i]] - pca_df_zeros[std_cols[i-1]])
-
-    # Step 4: Combine all series into a single PCA matrix
-    pca_df_combined = pd.concat([pca_df_zeros, pca_df_spreads, pca_df_flies], axis=1)
-
-    # Fill NaN values with the column mean (after calculation)
-    pca_vals = pca_df_combined.values.astype(float)
-    col_means = np.nanmean(pca_vals, axis=0)
-    if np.isnan(col_means).any():
-        overall_mean = np.nanmean(col_means[~np.isnan(col_means)]) if np.any(~np.isnan(col_means)) else 0.0
-        col_means = np.where(np.isnan(col_means), overall_mean, col_means)
-    inds = np.where(np.isnan(pca_vals))
-    if inds[0].size > 0:
-        pca_vals[inds] = np.take(col_means, inds[1])
-
-    return pd.DataFrame(pca_vals, index=pca_df_combined.index, columns=pca_df_combined.columns)
-
-def calculate_raw_metrics(dt, row_series, available_contracts, expiry_df, rate_unit, holidays_np, year_basis):
-    """
-    Calculates the 'Actual Curve' for the forecast date by mapping standard maturities
-    to the first, second, third, etc. available live contracts (simple sequential mapping).
-    """
-    std_arr = np.array(build_std_grid_by_rule(7.0), dtype=float)
+    # 1. Determine the relevant IMM contracts (March, June, September, December)
+    # The price_data columns are the contract codes (e.g., H21, M21, U21, Z21)
     
-    raw_data = []
-    for col in available_contracts:
-        mat_up = str(col).strip().upper()
-        if mat_up not in expiry_df.index: continue
-        exp = expiry_df.loc[mat_up, "DATE"]
-        if pd.isna(exp) or pd.Timestamp(exp).date() <= dt.date(): continue
-        raw_val = row_series.get(col, np.nan)
-        if pd.isna(raw_val): continue
-        rate_percent = denormalize_to_percent(normalize_rate_input(raw_val, rate_unit))
-        raw_data.append({'maturity': mat_up, 'expiry': exp, 'rate': rate_percent})
-
-    raw_data.sort(key=lambda x: x['expiry'])
-    
-    rates_map = {std_arr[i]: np.nan for i in range(len(std_arr))}
-    for i in range(len(std_arr)):
-        if i < len(raw_data):
-            rates_map[std_arr[i]] = raw_data[i]['rate']
-    
-    rates = np.array([rates_map.get(t, np.nan) for t in std_arr])
-    
-    spreads = np.full(len(std_arr) - 1, np.nan)
-    flies = np.full(len(std_arr) - 2, np.nan)
-
-    for i in range(len(spreads)):
-        rate1 = rates[i+1]
-        rate2 = rates[i]
-        if not np.isnan(rate1) and not np.isnan(rate2):
-            spreads[i] = rate1 - rate2
-
-    for i in range(len(flies)):
-        rate1 = rates[i+2]
-        rate2 = rates[i+1]
-        rate3 = rates[i]
-        if not np.isnan(rate1) and not np.isnan(rate2) and not np.isnan(rate3):
-            flies[i] = (rate1 - rate2) - (rate2 - rate3)
+    # Find the first contract that has a non-NaN value on the analysis_date
+    try:
+        current_prices = price_data.loc[analysis_date].dropna()
+        if current_prices.empty:
+            st.warning(f"No contract prices found on {analysis_date.strftime('%Y-%m-%d')}. Try a different date.")
+            return None, None
             
-    return rates, spreads, flies
+        first_contract = current_prices.index[0]
+        
+        # Filter the full historical price data to keep only contracts >= first_contract
+        price_data_filtered = price_data.loc[:, contracts_in_order(price_data.columns, start_contract=first_contract)].dropna(axis=0, how='all')
+        
+        # Filter expiry data to match the filtered price columns
+        relevant_contracts = price_data_filtered.columns.tolist()
+        expiry_data_filtered = expiry_data.loc[expiry_data.index.isin(relevant_contracts)].copy()
+        
+        return price_data_filtered, expiry_data_filtered
+        
+    except KeyError:
+        st.error(f"The analysis date {analysis_date.strftime('%Y-%m-%d')} is outside the historical data range.")
+        return None, None
+    except Exception as e:
+        st.error(f"An error occurred during contract filtering: {e}")
+        return None, None
 
-def forecast_pcs_var(PCs_df, lags=1):
-    """Forecasts the next Principal Component vector using VAR."""
-    if len(PCs_df) < lags + 5: return PCs_df.iloc[-1:].values
-    results = VAR(PCs_df).fit(lags)
-    return results.forecast(PCs_df.values[-lags:], steps=1)
-
-def forecast_pcs_arima(PCs_df):
-    """Forecasts the next Principal Component vector using ARIMA(1,1,0) per component."""
-    forecasts = []
-    for _, series in PCs_df.items():
-        if len(series) < 10:
-            forecasts.append(series.iloc[-1])
-            continue
+def contracts_in_order(all_contracts, start_contract=None):
+    """Returns a list of contracts sorted by year/month code."""
+    
+    # Simple sorting based on contract code (e.g., H21 < M21 < U21 < Z21 < H22)
+    # This works because the year comes second.
+    sorted_contracts = sorted(all_contracts, key=lambda x: (x[-2:], x[0]))
+    
+    if start_contract:
         try:
-            forecasts.append(ARIMA(series, order=(1, 1, 0)).fit().forecast(steps=1).iloc[0])
-        except Exception:
-             forecasts.append(series.iloc[-1])
-    return np.array(forecasts).reshape(1, -1)
-
-# --- CORE TRANSFORMATION FUNCTION FOR DISPLAY (Price/Rate Toggle) ---
-def transform_curve_for_display(curve_vector, all_cols_full, display_unit):
+            start_index = sorted_contracts.index(start_contract)
+            return sorted_contracts[start_index:]
+        except ValueError:
+            return sorted_contracts
+            
+    return sorted_contracts
+    
+def transform_to_analysis_curve(price_data, expiry_data, analysis_date):
     """
-    Transforms the full curve vector (Rates, Spreads, Flies) from Rate-space 
-    to Price-space (or keeps it in Rate-space) for visualization.
+    Transforms the historical price data into a curve where columns represent 
+    contracts relative to the analysis date, and returns the nearest contract price 
+    on the analysis date.
     """
-    if display_unit == "Rates (%)":
-        return curve_vector
+    if price_data is None or expiry_data is None:
+        return None, None
 
-    # Identify the indices for Outright Rates and for Differences (Spreads/Flies)
-    rates_cols = [c for c in all_cols_full if '-' not in c]
-    diff_cols = [c for c in all_cols_full if '-' in c]
+    # Get the nearest contract that was trading on or after the analysis date
+    analysis_contracts = contracts_in_order(price_data.columns)
     
-    rates_indices = np.where(np.isin(all_cols_full, rates_cols))[0]
-    diff_indices = np.where(np.isin(all_cols_full, diff_cols))[0]
+    # Re-index the price data columns to ensure proper order
+    price_data = price_data[analysis_contracts]
 
-    transformed_curve = curve_vector.copy()
+    # Use the first contract's price on the analysis date as the anchor for reconstruction later
+    nearest_contract_code = analysis_contracts[0]
+    try:
+        # Find the row for the analysis date, then select the price of the nearest contract
+        nearest_contract_price = price_data.loc[analysis_date, nearest_contract_code]
+    except KeyError:
+        st.error(f"Could not find price for contract {nearest_contract_code} on {analysis_date.strftime('%Y-%m-%d')}.")
+        return None, None
 
-    # 1. Transform Rates to Price (Price = 100 - Rate)
-    transformed_curve[rates_indices] = 100.0 - transformed_curve[rates_indices]
+    return price_data, nearest_contract_price
 
-    # 2. Transform Spreads/Flies (Differences) by negating them
-    # Price Spread = P_B - P_A = (100-R_B) - (100-R_A) = R_A - R_B = - (Rate Spread)
-    transformed_curve[diff_indices] = -transformed_curve[diff_indices]
+# --- Core Derivative Calculation Functions (MODIFIED to accept gap_contracts) ---
 
-    return transformed_curve
-# ---------------------------------------------------------------------------------
+def calculate_outright_spreads(prices_df, gap_contracts=1):
+    """
+    Calculates calendar spreads (C_N - C_{N + gap_contracts}).
+    gap_contracts=1 is 3-month, 2 is 6-month, 4 is 12-month.
+    """
+    contracts = prices_df.columns
+    spreads_df = pd.DataFrame(index=prices_df.index)
 
-def main():
-    st.title("🏛️ Futures Curve Backtesting Engine")
-    st.markdown("This tool performs a walk-forward backtest of PCA-based curve forecasting models using **your uploaded data** (e.g., SOFR, DI, Eurodollar).")
-    st.markdown("---")
-
-    # --- 1) File Uploads ---
-    st.sidebar.header("1) Upload Data")
-    yield_file = st.sidebar.file_uploader("Yield data CSV", type="csv")
-    expiry_file = st.sidebar.file_uploader("Expiry mapping CSV", type="csv")
-    holiday_file = st.sidebar.file_uploader("Holiday dates CSV (optional)", type="csv")
-
-    # --- 2) Model and Backtest Config ---
-    st.sidebar.header("2) Configure Backtest")
-    backtest_start_date = st.sidebar.date_input("Backtest Start Date", pd.to_datetime('2024-01-01').date())
-    backtest_end_date = st.sidebar.date_input("Backtest End Date", pd.to_datetime('2024-03-31').date())
-    training_window_days = st.sidebar.number_input("Rolling Training Window (business days)", min_value=120, max_value=500, value=252, step=1)
-    
-    st.sidebar.subheader("Model Parameters")
-    n_components_sel = st.sidebar.slider("Number of PCA components", 1, 10, 3)
-    forecast_model_type = st.sidebar.selectbox("Forecasting Model to Test", ["PCA Fair Value", "VAR (Vector Autoregression)", "ARIMA (per Component)"])
-    var_lags = 1
-    if forecast_model_type == "VAR (Vector Autoregression)":
-        var_lags = st.sidebar.number_input("VAR model lags", min_value=1, max_value=20, value=1, step=1)
+    for i in range(len(contracts) - gap_contracts):
+        c1 = contracts[i]
+        c2 = contracts[i + gap_contracts]
         
-    st.sidebar.subheader("Data Conventions")
-    rate_unit = st.sidebar.selectbox("Input rate unit", ["Percent (e.g. 13.45)", "Decimal (e.g. 0.1345)", "Basis points (e.g. 1345)"])
-    year_basis = int(st.sidebar.selectbox("Business days in year", [252, 360], index=0))
-    interp_method = "linear"
+        # Determine the tenor for labeling
+        tenor_months = gap_contracts * 3
+        name_suffix = f" ({tenor_months}M)" if tenor_months != 3 else "" # 3M spread name is already C1-C2
+            
+        spread_name = f"{c1}-{c2}{name_suffix}"
+        spreads_df[spread_name] = prices_df[c1] - prices_df[c2]
 
-    # --- 3) Display Unit Selector ---
-    st.sidebar.header("3) Visualization Options")
-    # This selector ensures all results are shown as Price (Index) if selected
-    display_unit = st.sidebar.selectbox("Display Results as", ["Rates (%)", "Price (Index)"])
+    return spreads_df
 
-    # --- Initialize session state ---
-    if 'results_df' not in st.session_state: st.session_state.results_df = None
-    if 'unique_dates' not in st.session_state: st.session_state.unique_dates = []
-    if 'selected_date_index' not in st.session_state: st.session_state.selected_date_index = 0
-    if 'selected_spread_date_index' not in st.session_state: st.session_state.selected_spread_date_index = 0
+def calculate_butterflies(prices_df, gap_contracts=1):
+    """
+    Calculates butterfly spreads (C_N - 2*C_{N + gap_contracts} + C_{N + 2*gap_contracts}).
+    gap_contracts=1 is a standard 3-month fly, 2 is a 6-month fly, 4 is a 12-month fly.
+    """
+    contracts = prices_df.columns
+    butterflies_df = pd.DataFrame(index=prices_df.index)
+
+    required_contracts = 2 * gap_contracts
     
-    # --- Callbacks for Next/Prev Buttons and Syncing ---
-    def next_date():
-        if st.session_state.selected_date_index < len(st.session_state.unique_dates) - 1:
-            st.session_state.selected_date_index += 1
+    for i in range(len(contracts) - required_contracts):
+        c1 = contracts[i]
+        c2 = contracts[i + gap_contracts]
+        c3 = contracts[i + required_contracts]
 
-    def prev_date():
-        if st.session_state.selected_date_index > 0:
-            st.session_state.selected_date_index -= 1
-
-    def next_spread_date():
-        if st.session_state.selected_spread_date_index < len(st.session_state.unique_dates) - 1:
-            st.session_state.selected_spread_date_index += 1
-
-    def prev_spread_date():
-        if st.session_state.selected_spread_date_index > 0:
-            st.session_state.selected_spread_date_index -= 1
-            
-    def sync_rates_index():
-        unique_dates = st.session_state.unique_dates
-        if unique_dates.size > 0 and st.session_state.rates_date_select in unique_dates:
-            st.session_state.selected_date_index = unique_dates.tolist().index(st.session_state.rates_date_select)
-
-    def sync_spreads_index():
-        unique_dates = st.session_state.unique_dates
-        if unique_dates.size > 0 and st.session_state.spreads_date_select in unique_dates:
-            st.session_state.selected_spread_date_index = unique_dates.tolist().index(st.session_state.spreads_date_select)
-
-    # --- Run/Reset Buttons ---
-    st.sidebar.markdown("---")
-    col1, col2 = st.sidebar.columns(2)
-    run_backtest = col1.button("Run Backtest", type="primary")
-
-    if col2.button("Reset"):
-        st.session_state.results_df = None
-        st.session_state.selected_date_index = 0
-        st.session_state.selected_spread_date_index = 0
-        st.rerun()
-
-    # --- Backtest Execution ---
-    if run_backtest and st.session_state.results_df is None:
-        if not all([yield_file, expiry_file]):
-            st.error("Please upload both Yield and Expiry data files.")
-            st.stop()
-        if backtest_start_date >= backtest_end_date:
-            st.error("Backtest Start Date must be before the End Date.")
-            st.stop()
-
-        @st.cache_data(show_spinner="Loading and sanitizing data...")
-        def load_all_data(yield_file, expiry_file, holiday_file):
-            # Yields
-            yields_df = pd.read_csv(io.StringIO(yield_file.getvalue().decode("utf-8")))
-            date_col = yields_df.columns[0]
-            yields_df[date_col] = yields_df[date_col].apply(safe_to_datetime)
-            yields_df = yields_df.dropna(subset=[date_col]).set_index(date_col).sort_index()
-            yields_df.columns = [str(c).strip() for c in yields_df.columns]
-            for c in yields_df.columns:
-                yields_df[c] = pd.to_numeric(yields_df[c], errors="coerce")
-            
-            # Expiry
-            expiry_raw = pd.read_csv(io.StringIO(expiry_file.getvalue().decode("utf-8")))
-            expiry_df = expiry_raw.iloc[:, :2].copy()
-            expiry_df.columns = ["MATURITY", "DATE"]
-            expiry_df["MATURITY"] = expiry_df["MATURITY"].astype(str).str.strip().str.upper()
-            expiry_df["DATE"] = expiry_df["DATE"].apply(safe_to_datetime)
-            expiry_df = expiry_df.dropna(subset=["DATE"]).set_index("MATURITY")
-
-            # Holidays
-            holidays_np = np.array([], dtype="datetime64[D]")
-            if holiday_file:
-                hol_df = pd.read_csv(io.StringIO(holiday_file.getvalue().decode("utf-8")))
-                hol_series = hol_df.iloc[:, 0].apply(safe_to_datetime).dropna()
-                if not hol_series.empty:
-                    holidays_np = np.array(hol_series.dt.date, dtype="datetime64[D]")
-                    
-            return yields_df, expiry_df, holidays_np
-
-        yields_df, expiry_df, holidays_np = load_all_data(yield_file, expiry_file, holiday_file)
-
-        # --- BACKTESTING LOOP ---
-        st.subheader("Running Walk-Forward Backtest...")
+        # Determine the leg tenor for labeling
+        tenor_months = gap_contracts * 3
+        name_suffix = f" ({tenor_months}M Leg)" if tenor_months != 3 else ""
         
-        results = []
-        backtest_range = pd.bdate_range(start=backtest_start_date, end=backtest_end_date)
-        all_available_dates = yields_df.index
+        butterfly_name = f"{c1}-{c2}x2-{c3}{name_suffix}"
+        butterflies_df[butterfly_name] = prices_df[c1] - 2 * prices_df[c2] + prices_df[c3]
+        
+    return butterflies_df
 
-        # Setup grid
-        std_arr = np.array(build_std_grid_by_rule(7.0), dtype=float)
-        std_cols = [f"{m:.2f}Y" for m in std_arr]
-        spread_cols_pca = [f"{std_cols[i]}-{std_cols[i-1]}" for i in range(1, len(std_cols))]
-        fly_cols_pca = [f"{std_cols[i+1]}-{std_cols[i]}-{std_cols[i-1]}" for i in range(1, len(std_cols) - 1)]
-        all_cols_full = std_cols + spread_cols_pca + fly_cols_pca
+# --- PCA and Reconstruction Functions ---
 
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+def run_pca_and_get_loadings(data_df, n_components):
+    """Runs PCA, returns fitted PCA object, scaled data, and loadings."""
+    # Standardize the data
+    data_mean = data_df.mean()
+    data_std = data_df.std()
+    data_scaled = (data_df - data_mean) / data_std
+    
+    # Run PCA
+    pca = PCA(n_components=n_components)
+    pca.fit(data_scaled.dropna())
+    
+    # Calculate Loadings (Eigenvectors)
+    loadings = pd.DataFrame(
+        pca.components_.T, 
+        index=data_scaled.columns, 
+        columns=[f'PC{i+1}' for i in range(n_components)]
+    )
+    
+    return pca, data_scaled, data_mean, data_std, loadings
 
-        for i, current_date in enumerate(backtest_range):
-            if current_date not in all_available_dates: continue
+def calculate_outright_loadings(derivatives_loadings, outright_contracts, nearest_contract_price=100.0):
+    """
+    Transforms spread/fly loadings into outright price loadings using cumulative sum,
+    anchored to a reference price (e.g., nearest contract price).
+    """
+    # Create a DataFrame for outright loadings, starting with the nearest contract
+    # Initialize all PC's impact to zero for the anchor contract
+    outright_loadings = pd.DataFrame(0.0, index=outright_contracts, columns=derivatives_loadings.columns)
+    
+    # Find the nearest contract column index in the derivatives loadings
+    nearest_contract_code = outright_contracts[0]
+    
+    # The spread between the first two contracts (C1 - C2) is the first row in the 3M spread section
+    # We assume the spread columns are ordered C1-C2, C2-C3, C3-C4, etc.
+    
+    # Use the 3M Spread loadings (C_N - C_{N+1}) to calculate cumulative loadings
+    
+    # Filter for 3M spreads. Assuming the 3M spread names don't have "(3M)" in the modified code.
+    spread_columns = [col for col in derivatives_loadings.index if col not in butterflies_df.columns and "M)" not in col]
+    spread_loadings_3m = derivatives_loadings.loc[spread_columns]
+    
+    if len(spread_loadings_3m) < len(outright_contracts) - 1:
+        st.warning("Not enough 3M spreads found to fully calculate outright loadings.")
+        
+    for pc_name in derivatives_loadings.columns:
+        # The outright price of C2 is C1 - Spread(C1-C2)
+        # Therefore, the outright loading of C2 is Load_C1 - Load_Spread(C1-C2)
+        # Since we anchor C1 (the nearest contract) loading at 0.0, the loading for C2 is:
+        # Load_C2 = Load_C1 - Load_Spread(C1-C2) = 0.0 - Load_Spread(C1-C2)
+        
+        # Calculate the cumulative sum of the negative 3M spread loadings
+        # Load_Cn = Load_C(n-1) - Load_Spread(C(n-1)-Cn)
+        # This is equivalent to: -CumulativeSum(Load_Spread)
+        
+        # The cumulative sum of the negative loadings of the 3M spreads
+        cumulative_loadings = -spread_loadings_3m[pc_name].cumsum()
+        
+        # Apply the cumulative sum to the outright loadings, starting from the second contract
+        # The index of outright_loadings starts at 0 (nearest_contract_code), the cumulative_loadings starts at C2's change
+        outright_loadings.loc[outright_contracts[1:1+len(cumulative_loadings)], pc_name] = cumulative_loadings.values
 
-            training_end_date = current_date - pd.Timedelta(days=1)
-            training_start_date = training_end_date - pd.DateOffset(days=training_window_days * 1.5)
+    return outright_loadings
+
+def transform_and_reconstruct(data_df, pca_model, data_mean, data_std, num_pcs):
+    """Scales data, calculates scores, sets non-selected scores to zero, and reconstructs data."""
+    
+    # 1. Scale data
+    data_scaled = (data_df - data_mean) / data_std
+    data_clean = data_scaled.dropna(how='all')
+    
+    # 2. Calculate PC Scores
+    scores = pd.DataFrame(
+        pca_model.transform(data_clean),
+        index=data_clean.index,
+        columns=[f'PC{i+1}' for i in range(len(pca_model.components_))]
+    )
+    
+    # 3. Apply PCA selection: set non-selected factor scores to zero
+    selected_scores = scores.copy()
+    if num_pcs < len(pca_model.components_):
+        cols_to_zero = [f'PC{i+1}' for i in range(num_pcs, len(pca_model.components_))]
+        selected_scores[cols_to_zero] = 0.0
+    
+    # 4. Reconstruct: Scores * Loadings.T + Mean (rescale)
+    # Reconstructed scaled data = Scores @ Loadings
+    reconstructed_scaled = pd.DataFrame(
+        selected_scores @ pca_model.components_[:len(selected_scores.columns)], 
+        index=selected_scores.index, 
+        columns=data_df.columns
+    )
+    
+    # Rescale back to original values: (Reconstructed_Scaled * Std) + Mean
+    reconstructed_df = (reconstructed_scaled * data_std) + data_mean
+    
+    return reconstructed_df, scores
+
+def reconstruct_prices_and_derivatives(reconstructed_derivatives, outright_contracts, nearest_contract_price):
+    """
+    Uses reconstructed derivative values (spreads/flies) to reconstruct the outright prices.
+    """
+    
+    # 1. Filter out the reconstructed 3M spreads
+    # Assuming 3M spread names don't have "M)" in the modified code (as determined in the helper)
+    spread_cols = [col for col in reconstructed_derivatives.columns if col not in butterflies_df.columns and "M)" not in col]
+    reconstructed_spreads_3m = reconstructed_derivatives[spread_cols]
+
+    # Create the DataFrame for reconstructed outright prices
+    reconstructed_prices = pd.DataFrame(index=reconstructed_derivatives.index, columns=outright_contracts)
+    
+    # Anchor the first contract price (C1) to the actual price (nearest_contract_price)
+    nearest_contract_code = outright_contracts[0]
+    reconstructed_prices[nearest_contract_code] = nearest_contract_price
+    
+    # Use the 3M spreads to iteratively build the rest of the curve
+    for i in range(len(outright_contracts) - 1):
+        c1 = outright_contracts[i]
+        c2 = outright_contracts[i+1]
+        
+        try:
+            spread_col_name = f"{c1}-{c2}"
             
-            train_mask = (yields_df.index >= training_start_date) & (yields_df.index <= training_end_date)
-            yields_df_train = yields_df.loc[train_mask].sort_index().tail(training_window_days)
+            # C2 = C1 - (C1 - C2) = C1 - Spread
+            reconstructed_prices[c2] = reconstructed_prices[c1] - reconstructed_spreads_3m[spread_col_name]
+        except KeyError:
+            # This happens when we run out of 3M spread data
+            break
 
-            if len(yields_df_train) < training_window_days / 2: continue
+    # 2. Calculate the fair spreads/flies from the reconstructed prices
+    reconstructed_spreads_3m = calculate_outright_spreads(reconstructed_prices, gap_contracts=1)
+    reconstructed_spreads_6m = calculate_outright_spreads(reconstructed_prices, gap_contracts=2)
+    reconstructed_spreads_12m = calculate_outright_spreads(reconstructed_prices, gap_contracts=4)
+    reconstructed_spreads = pd.concat([reconstructed_spreads_3m, reconstructed_spreads_6m, reconstructed_spreads_12m], axis=1)
 
-            pca_df_filled = build_pca_matrix(yields_df_train, expiry_df, std_arr, holidays_np, year_basis, rate_unit, interp_method)
-            if pca_df_filled.empty: continue
+    reconstructed_butterflies_3m = calculate_butterflies(reconstructed_prices, gap_contracts=1)
+    reconstructed_butterflies_6m = calculate_butterflies(reconstructed_prices, gap_contracts=2)
+    reconstructed_butterflies_12m = calculate_butterflies(reconstructed_prices, gap_contracts=4)
+    reconstructed_butterflies = pd.concat([reconstructed_butterflies_3m, reconstructed_butterflies_6m, reconstructed_butterflies_12m], axis=1)
+    
+    return reconstructed_prices, reconstructed_spreads, reconstructed_butterflies
 
-            # PCA Decomposition and Training
-            scaler = StandardScaler(with_std=False)
-            X = scaler.fit_transform(pca_df_filled.values.astype(float))
-            n_components_sel_capped = min(n_components_sel, X.shape[1])
-            pca = PCA(n_components=n_components_sel_capped)
-            PCs = pca.fit_transform(X)
-            pc_cols = [f"PC{i+1}" for i in range(n_components_sel_capped)]
-            PCs_df = pd.DataFrame(PCs, index=pca_df_filled.index, columns=pc_cols)
+def calculate_z_scores(scores_df):
+    """Calculates the Z-score for each PC score."""
+    z_scores = (scores_df - scores_df.mean()) / scores_df.std()
+    return z_scores
 
-            # Forecasting (in rate space)
-            if forecast_model_type == "PCA Fair Value":
-                last_pcs = PCs_df.iloc[-1].values.reshape(1, -1)
-                reconstructed_centered = pca.inverse_transform(last_pcs)
-                pred_full_curve = scaler.inverse_transform(reconstructed_centered).flatten()
-            else:
-                pcs_next = forecast_pcs_var(PCs_df, lags=var_lags) if forecast_model_type == "VAR (Vector Autoregression)" else forecast_pcs_arima(PCs_df)
-                last_actual_full_curve = pca_df_filled.iloc[-1].values
-                last_pcs = PCs_df.iloc[-1].values.reshape(1, -1)
-                delta_pcs = pcs_next - last_pcs
-                delta_curve = pca.inverse_transform(delta_pcs)
-                pred_full_curve = last_actual_full_curve + delta_curve.flatten()
+# --- Streamlit Application ---
 
-            # Build the ACTUAL curve (in rate space)
-            actual_rates_raw, actual_spreads_raw, actual_flies_raw = calculate_raw_metrics(
-                current_date, yields_df.loc[current_date], yields_df.columns, expiry_df, rate_unit, holidays_np, year_basis
+st.title("SOFR Futures PCA Risk Analyzer")
+st.markdown("---")
+
+# --- 1. File Upload and Date Selection ---
+st.header("1. Data Loading and Analysis Date Selection")
+
+col1, col2 = st.columns(2)
+with col1:
+    uploaded_price_file = st.file_uploader("Upload SOFR Price Data (CSV)", type="csv", key="price")
+with col2:
+    uploaded_expiry_file = st.file_uploader("Upload Contract Expiry Data (CSV)", type="csv", key="expiry")
+
+if uploaded_price_file and uploaded_expiry_file:
+    price_data = load_data(uploaded_price_file)
+    expiry_data = load_data(uploaded_expiry_file)
+    
+    if price_data is not None and expiry_data is not None:
+        
+        # Determine the latest date in the price data for the default
+        max_date = price_data.index.max().date()
+        
+        analysis_date = st.date_input(
+            "Select Analysis Date (latest available date is recommended for snapshot)",
+            value=max_date,
+            max_value=max_date
+        )
+        
+        analysis_date = datetime.combine(analysis_date, datetime.min.time())
+        
+        # --- 2. Data Filtering and Preprocessing ---
+        
+        price_data_filtered, expiry_data_filtered = get_analysis_contracts(price_data, expiry_data, analysis_date)
+        
+        if price_data_filtered is not None and expiry_data_filtered is not None:
+            
+            # Filter and order the price data for analysis
+            price_data, nearest_contract_price = transform_to_analysis_curve(
+                price_data_filtered, expiry_data_filtered, analysis_date
             )
-            actual_full_curve = np.concatenate([actual_rates_raw, actual_spreads_raw, actual_flies_raw])
             
-            results.append({
-                "Date": current_date,
-                "Predicted_Curve": pred_full_curve,
-                "Actual_Curve": actual_full_curve,
-                "Column_Names": all_cols_full
-            })
+            if price_data is None:
+                st.stop()
 
-            progress_bar.progress((i + 1) / len(backtest_range))
-            status_text.text(f"Processing: {current_date.date()}...")
+            # The contract list is now the ordered list of all contracts from the nearest forward
+            outright_contracts = price_data.columns.tolist()
 
-        status_text.success("Backtest complete!")
-        progress_bar.empty()
-        
-        if results:
-            st.session_state.results_df = pd.DataFrame(results)
-    
-    # --------------------------
-    # RESULTS ANALYSIS
-    # --------------------------
-    if st.session_state.results_df is not None:
-        st.header("📊 Backtest Results Analysis")
-        results_df = st.session_state.results_df.copy()
-        
-        mask = results_df['Actual_Curve'].apply(lambda x: isinstance(x, float) or np.isnan(x).all())
-        results_df = results_df[~mask].copy()
+            st.success(f"Data ready. Nearest contract: **{outright_contracts[0]}** (Price: **{nearest_contract_price:.4f}**)")
+            st.dataframe(price_data.tail(), use_container_width=True)
 
-        if results_df.empty:
-            st.error("No valid results to analyze after cleaning. Check data availability and backtest range.")
-            st.stop()
 
-        all_cols = results_df.iloc[0]['Column_Names']
-        std_cols_f = [c for c in all_cols if '-' not in c]
-        spread_cols_f = [c for c in all_cols if '-' in c and len(c.split('-')) == 2]
-        fly_cols_f = [c for c in all_cols if '-' in c and len(c.split('-')) == 3]
-
-        # Function to calculate errors (magnitude is the same in Rate and Price space)
-        def calculate_errors(row, cols):
-            indices = np.where(np.isin(all_cols, cols))[0]
-            pred = row['Predicted_Curve'][indices]
-            actual = row['Actual_Curve'][indices]
+            # --- 3. PCA Setup: Calculate Spreads and Butterflies (MODIFIED to include 6M, 12M) ---
             
-            if np.isnan(actual).all() or len(actual) == 0: return pd.Series({'RMSE': np.nan, 'MAE': np.nan})
-            return pd.Series({
-                'RMSE': np.sqrt(np.nanmean((pred - actual)**2)),
-                'MAE': np.nanmean(np.abs(pred - actual))
-            })
-        
-        # Errors are calculated on the rate-space curve (magnitudes are identical in price space)
-        results_df[['Daily_RMSE_Rates', 'Daily_MAE_Rates']] = results_df.apply(lambda row: calculate_errors(row, std_cols_f), axis=1)
-        results_df[['Daily_RMSE_Spreads', 'Daily_MAE_Spreads']] = results_df.apply(lambda row: calculate_errors(row, spread_cols_f), axis=1)
-        results_df[['Daily_RMSE_Flies', 'Daily_MAE_Flies']] = results_df.apply(lambda row: calculate_errors(row, fly_cols_f), axis=1)
+            # Calculate 3M, 6M, and 12M Spreads
+            spreads_3m_df = calculate_outright_spreads(price_data, gap_contracts=1)
+            spreads_6m_df = calculate_outright_spreads(price_data, gap_contracts=2)
+            spreads_12m_df = calculate_outright_spreads(price_data, gap_contracts=4)
+            spreads_df = pd.concat([spreads_3m_df, spreads_6m_df, spreads_12m_df], axis=1)
 
-        unit_label = "Price (Index)" if display_unit == "Price (Index)" else "Rate (%)"
-
-        # --------------------------
-        # Outright Rates Results
-        # --------------------------
-        st.subheader(f"1. Outright {unit_label} Performance")
-        
-        col1, col2 = st.columns(2)
-        col1.metric(f"Avg Daily Curve RMSE ({unit_label})", f"{results_df['Daily_RMSE_Rates'].mean():.4f}")
-        col2.metric(f"Avg Daily Curve MAE ({unit_label})", f"{results_df['Daily_MAE_Rates'].mean():.4f}")
-
-        st.markdown("---")
-        st.subheader(f"Daily Curve Visualization (Outright {unit_label})")
-
-        unique_dates = results_df['Date'].dt.date.unique()
-        st.session_state.unique_dates = unique_dates
-
-        prev_col, date_col, next_col = st.columns([1, 4, 1])
-        
-        # Ensure the date index is clamped within bounds before setting the selectbox index
-        if st.session_state.selected_date_index >= len(unique_dates):
-             st.session_state.selected_date_index = len(unique_dates) - 1
-        if st.session_state.selected_date_index < 0:
-             st.session_state.selected_date_index = 0
-
-        prev_col.button("◀ Previous", key="rates_prev", on_click=prev_date)
-        next_col.button("Next ▶", key="rates_next", on_click=next_date)
-        
-        selected_date = date_col.selectbox(
-            "Select a date to inspect",
-            options=unique_dates,
-            index=st.session_state.selected_date_index,
-            key="rates_date_select",
-            on_change=sync_rates_index
-        )
-        
-        if selected_date:
-            plot_data = results_df[results_df['Date'].dt.date == selected_date]
-            if not plot_data.empty:
-                full_actual_curve_vector = plot_data['Actual_Curve'].iloc[0]
-                full_pred_curve_vector = plot_data['Predicted_Curve'].iloc[0]
-
-                # --- Transform to display unit ---
-                actual_transformed = transform_curve_for_display(full_actual_curve_vector, all_cols, display_unit)
-                pred_transformed = transform_curve_for_display(full_pred_curve_vector, all_cols, display_unit)
+            # Calculate 3M, 6M, and 12M Butterflies
+            butterflies_3m_df = calculate_butterflies(price_data, gap_contracts=1)
+            butterflies_6m_df = calculate_butterflies(price_data, gap_contracts=2)
+            butterflies_12m_df = calculate_butterflies(price_data, gap_contracts=4)
+            butterflies_df = pd.concat([butterflies_3m_df, butterflies_6m_df, butterflies_12m_df], axis=1)
+            
+            # Combine all derivatives for PCA
+            derivatives_df = pd.concat([spreads_df, butterflies_df], axis=1).dropna(how='all')
+            
+            
+            if derivatives_df.shape[1] > 0 and derivatives_df.shape[0] > 100: # Check for minimum data
                 
-                # Slicing for outright rates
-                indices = np.where(np.isin(all_cols, std_cols_f))[0]
-                actual_c = actual_transformed[indices]
-                pred_c = pred_transformed[indices]
-
-                std_arr = np.array(build_std_grid_by_rule(7.0), dtype=float)
-
-                fig, ax = plt.subplots(figsize=(14, 7))
-                ax.plot(std_arr, actual_c, label=f"Actual on {selected_date}", color='royalblue', marker='o', linestyle='-')
-                ax.plot(std_arr, pred_c, label=f"Predicted for {selected_date}", color='darkorange', marker='x', linestyle='--')
+                # --- 4. PCA Execution and Factor Selection ---
+                st.header("2. PCA Execution and Factor Selection")
                 
-                ax.set_title(f"Yield Curve Forecast vs. Actual for {selected_date} (Outright {unit_label})", fontsize=16)
-                ax.set_xlabel("Standardized Maturity (Years)")
-                ax.set_ylabel(unit_label)
-                ax.set_xticks(std_arr)
-                ax.set_xticklabels([f"{m:.2f}Y" for m in std_arr], rotation=45, ha="right")
-                ax.legend()
-                ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+                max_pcs = min(20, derivatives_df.shape[1])
+                n_components = st.slider("Select Number of Principal Components to Keep", 
+                                         min_value=1, 
+                                         max_value=max_pcs, 
+                                         value=min(3, max_pcs), 
+                                         step=1)
+                
+                # Run PCA
+                try:
+                    pca, data_scaled, data_mean, data_std, loadings = run_pca_and_get_loadings(
+                        derivatives_df, n_components=max_pcs
+                    )
+                except ValueError as e:
+                    st.error(f"PCA Error: {e}. This often means the input data has too few non-NaN rows or non-zero columns for the requested number of components.")
+                    st.stop()
+                    
+                
+                # Explained Variance
+                explained_variance_ratio = pca.explained_variance_ratio_
+                cumulative_variance = np.cumsum(explained_variance_ratio)
+                
+                st.markdown("###### Explained Variance Ratio")
+                var_df = pd.DataFrame({
+                    'PC': [f'PC{i+1}' for i in range(max_pcs)],
+                    'Variance (%)': (explained_variance_ratio * 100).round(2),
+                    'Cumulative (%)': (cumulative_variance * 100).round(2)
+                }).set_index('PC')
+                st.dataframe(var_df.T, use_container_width=True)
+                
+                
+                # --- 5. Factor Interpretation: Loadings and Shapes ---
+                st.header("3. Factor Interpretation: Loadings and Shapes")
+                
+                # Filter loadings to only the selected number of components
+                selected_loadings = loadings.iloc[:, :n_components]
+                
+                # --- 5.1. Derivative Loadings Heatmap ---
+                st.markdown("##### 3.1. Derivative Loadings Heatmap")
+                fig_loadings, ax_loadings = plt.subplots(figsize=(12, 0.4 * selected_loadings.shape[0]))
+                sns.heatmap(selected_loadings, annot=True, cmap="coolwarm", fmt=".2f", linewidths=.5, linecolor='black', cbar_kws={'label': 'Loadings (Weights)'}, ax=ax_loadings)
+                ax_loadings.set_title(f"PCA Factor Loadings on Derivatives (3M, 6M, 12M Spreads/Flies)")
+                plt.xticks(rotation=0)
+                plt.yticks(rotation=0)
                 plt.tight_layout()
-                st.pyplot(fig)
-
-        # --------------------------
-        # Spreads and Flies Results
-        # --------------------------
-        st.markdown("---")
-        st.subheader(f"2. Spreads and Flies Performance ({unit_label} Differences)")
-        
-        col3, col4 = st.columns(2)
-        col3.metric(f"Avg Daily Curve RMSE (Spreads, {unit_label})", f"{results_df['Daily_RMSE_Spreads'].mean():.4f}")
-        col4.metric(f"Avg Daily Curve MAE (Flies, {unit_label})", f"{results_df['Daily_MAE_Flies'].mean():.4f}")
-
-        st.markdown("---")
-        st.subheader(f"Daily Visualization (Spreads and Flies - {unit_label} Differences)")
-
-        prev_col, spread_date_col, next_col = st.columns([1, 4, 1])
-
-        # Ensure the date index is clamped within bounds before setting the selectbox index
-        if st.session_state.selected_spread_date_index >= len(unique_dates):
-             st.session_state.selected_spread_date_index = len(unique_dates) - 1
-        if st.session_state.selected_spread_date_index < 0:
-             st.session_state.selected_spread_date_index = 0
-        
-        prev_col.button("◀ Previous", key="spread_prev", on_click=prev_spread_date)
-        next_col.button("Next ▶", key="spread_next", on_click=next_spread_date)
-        
-        selected_spread_date = spread_date_col.selectbox(
-            "Select a date to inspect spreads/flies",
-            options=unique_dates,
-            index=st.session_state.selected_spread_date_index,
-            key="spreads_date_select",
-            on_change=sync_spreads_index
-        )
-        
-        if selected_spread_date:
-            plot_data = results_df[results_df['Date'].dt.date == selected_spread_date]
-            if not plot_data.empty:
-                full_actual_curve_vector = plot_data['Actual_Curve'].iloc[0]
-                full_pred_curve_vector = plot_data['Predicted_Curve'].iloc[0]
+                st.pyplot(fig_loadings)
                 
-                # --- Transform to display unit ---
-                actual_transformed = transform_curve_for_display(full_actual_curve_vector, all_cols, display_unit)
-                pred_transformed = transform_curve_for_display(full_pred_curve_vector, all_cols, display_unit)
-
-                # Slicing for spreads/flies
-                spread_indices = np.where(np.isin(all_cols, spread_cols_f))[0]
-                actual_spreads = actual_transformed[spread_indices]
-                pred_spreads = pred_transformed[spread_indices]
+                # --- 5.2. Outright Price Loadings (Factor Shapes) ---
+                st.markdown("##### 3.2. Outright Price Loadings (Factor Shapes)")
+                outright_loadings = calculate_outright_loadings(selected_loadings, outright_contracts, nearest_contract_price)
                 
-                fly_indices = np.where(np.isin(all_cols, fly_cols_f))[0]
-                actual_flies = actual_transformed[fly_indices]
-                pred_flies = pred_transformed[fly_indices]
-
-                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-                
-                # Spreads Plot
-                ax1.plot(spread_cols_f, actual_spreads, marker='o', linestyle='-', color='royalblue', label=f"Actual Spreads")
-                ax1.plot(spread_cols_f, pred_spreads, marker='x', linestyle='--', color='darkorange', label="Predicted Spreads")
-                ax1.set_title(f"Spread Forecast vs. Actual for {selected_spread_date}")
-                ax1.set_ylabel(f"Spread ({unit_label} Diff)")
-                ax1.set_xticklabels(spread_cols_f, rotation=45, ha="right")
-                ax1.grid(True, which='both', linestyle='--', linewidth=0.5)
-                ax1.legend()
-                
-                # Flies Plot
-                ax2.plot(fly_cols_f, actual_flies, marker='o', linestyle='-', color='royalblue', label=f"Actual Flies")
-                ax2.plot(fly_cols_f, pred_flies, marker='x', linestyle='--', color='darkorange', label="Predicted Flies")
-                ax2.set_title(f"Butterfly Forecast vs. Actual for {selected_spread_date}")
-                ax2.set_ylabel(f"Fly ({unit_label} Diff)")
-                ax2.set_xticklabels(fly_cols_f, rotation=45, ha="right")
-                ax2.grid(True, which='both', linestyle='--', linewidth=0.5)
-                ax2.legend()
-                
+                fig_shape, ax_shape = plt.subplots(figsize=(12, 6))
+                outright_loadings.plot(kind='line', ax=ax_shape, marker='o')
+                ax_shape.set_title("PCA Factor Impact on Outright Price Curve (Factor Shapes)")
+                ax_shape.set_xlabel("Contract")
+                ax_shape.set_ylabel("Loadings (Change in Price for 1 Std Dev PC Move)")
+                ax_shape.grid(True, linestyle='--')
+                plt.xticks(rotation=45, ha='right')
                 plt.tight_layout()
-                st.pyplot(fig)
+                st.pyplot(fig_shape)
 
-        st.markdown("---")
-        st.subheader(f"Raw Results Dataframe (Full Curve in {unit_label})")
-        st.write("Contains the raw predicted and actual outright rates, spread, and fly vectors after conversion to the selected display unit.")
+                
+                # --- 6. Factor Scores and Z-Scores ---
+                st.header("4. Factor Scores Time Series and Z-Scores")
+                
+                reconstructed_df, scores = transform_and_reconstruct(
+                    derivatives_df, pca, data_mean, data_std, n_components=max_pcs # Use max for scores time series
+                )
+                selected_scores = scores.iloc[:, :n_components]
+                z_scores = calculate_z_scores(selected_scores)
+                
+                # Plot PC Scores Time Series
+                for i in range(n_components):
+                    pc_name = f'PC{i+1}'
+                    fig_score, ax_score = plt.subplots(figsize=(12, 4))
+                    selected_scores[pc_name].plot(ax=ax_score, title=f"{pc_name} Score Time Series")
+                    ax_score.grid(True, linestyle='--')
+                    ax_score.set_ylabel("Score Value (in Std Devs)")
+                    plt.tight_layout()
+                    st.pyplot(fig_score)
+                    
+                st.markdown("###### Factor Z-Scores (Current Deviation)")
+                st.dataframe(z_scores.iloc[-1:].T.rename(columns={z_scores.index[-1]: 'Z-Score'}), use_container_width=True)
 
-        raw_df = pd.DataFrame(results_df['Date']).set_index('Date')
-        
-        # Apply transformation to the entire results dataframe before extraction
-        results_df['Predicted_Display'] = results_df.apply(lambda row: transform_curve_for_display(row['Predicted_Curve'], all_cols, display_unit), axis=1)
-        results_df['Actual_Display'] = results_df.apply(lambda row: transform_curve_for_display(row['Actual_Curve'], all_cols, display_unit), axis=1)
 
-        # Extract transformed data
-        rates_start_idx = 0
-        spreads_start_idx = len(std_cols_f)
-        flies_start_idx = spreads_start_idx + len(spread_cols_f)
+                # --- 7. Curve Snapshot Analysis (Mispricing) (UPDATED to use combined data) ---
+                st.header("5. Curve Snapshot Analysis (Mispricing)")
+                
+                # Recalculate Reconstruction using ONLY the selected PCs
+                reconstructed_derivatives_selected, _ = transform_and_reconstruct(
+                    derivatives_df, pca, data_mean, data_std, num_pcs=n_components
+                )
+                
+                # Get the fair value curve (prices, spreads, flies)
+                (
+                    pca_fair_prices, 
+                    pca_fair_spreads, 
+                    pca_fair_butterflies
+                ) = reconstruct_prices_and_derivatives(
+                    reconstructed_derivatives_selected, 
+                    outright_contracts, 
+                    nearest_contract_price
+                )
 
-        for i, col in enumerate(std_cols_f):
-            raw_df[f"Predicted_{col}"] = results_df['Predicted_Display'].apply(lambda x: x[rates_start_idx + i])
-            raw_df[f"Actual_{col}"] = results_df['Actual_Display'].apply(lambda x: x[rates_start_idx + i])
+                
+                # --- 7.1. Outright Price Mispricing ---
+                st.markdown("### Outright Prices")
+                try:
+                    # Get prices for the analysis date
+                    original_prices_snap = price_data.loc[analysis_date].dropna()
+                    pca_fair_prices_snap = pca_fair_prices.loc[analysis_date].dropna()
+                    
+                    # Align and calculate mispricing
+                    outright_comparison = pd.DataFrame({
+                        'Original': original_prices_snap,
+                        'PCA Fair': pca_fair_prices_snap
+                    }).dropna()
+                    
+                    mispricing = outright_comparison['Original'] - outright_comparison['PCA Fair']
+                    
+                    # Plotting
+                    fig_outright, ax_outright = plt.subplots(figsize=(12, 6))
+                    outright_comparison.plot(ax=ax_outright, marker='o')
+                    mispricing.plot(ax=ax_outright.twinx(), kind='bar', color='grey', alpha=0.3, label='Mispricing (Original - PCA Fair)')
+                    ax_outright.set_title(f"Outright Curve Snapshot on {analysis_date.strftime('%Y-%m-%d')}")
+                    ax_outright.set_ylabel("Price")
+                    ax_outright.set_xlabel("Contract")
+                    ax_outright.grid(True, linestyle='--')
+                    plt.xticks(rotation=45, ha='right')
+                    plt.tight_layout()
+                    st.pyplot(fig_outright)
 
-        for i, col in enumerate(spread_cols_f):
-            raw_df[f"Predicted_Spread_{col}"] = results_df['Predicted_Display'].apply(lambda x: x[spreads_start_idx + i])
-            raw_df[f"Actual_Spread_{col}"] = results_df['Actual_Display'].apply(lambda x: x[spreads_start_idx + i])
-            
-        for i, col in enumerate(fly_cols_f):
-            raw_df[f"Predicted_Fly_{col}"] = results_df['Predicted_Display'].apply(lambda x: x[flies_start_idx + i])
-            raw_df[f"Actual_Fly_{col}"] = results_df['Actual_Display'].apply(lambda x: x[flies_start_idx + i])
+                    # Table
+                    st.markdown("###### Outright Mispricing")
+                    detailed_comparison_outright = outright_comparison.copy()
+                    detailed_comparison_outright.index.name = 'Outright Contract'
+                    detailed_comparison_outright['Mispricing (BPS)'] = mispricing * 10000
+                    st.dataframe(
+                        detailed_comparison_outright.style.format({
+                            'Original': "{:.4f}",
+                            'PCA Fair': "{:.4f}",
+                            'Mispricing (BPS)': "{:.2f}"
+                        }),
+                        use_container_width=True
+                    )
+                    
+                except KeyError:
+                    st.error(f"The selected analysis date **{analysis_date.strftime('%Y-%m-%d')}** is not present in the filtered price data. Please choose a different date within the historical range.")
+                
+                
+                # --- 7.2. Spread Mispricing ---
+                st.markdown("---")
+                st.markdown("### Calendar Spreads (3M, 6M, 12M)")
+                
+                # Check if there are any spreads calculated (should always be if > 1 contract)
+                if spreads_df.shape[1] > 0:
+                    try:
+                        original_spreads_snap = spreads_df.loc[analysis_date].dropna()
+                        pca_fair_spreads_snap = pca_fair_spreads.loc[analysis_date].dropna()
+                        
+                        # Align and calculate mispricing
+                        spread_comparison = pd.DataFrame({
+                            'Original': original_spreads_snap,
+                            'PCA Fair': pca_fair_spreads_snap
+                        }).dropna()
 
-        st.dataframe(raw_df)
+                        mispricing = spread_comparison['Original'] - spread_comparison['PCA Fair']
+                        
+                        # Plotting
+                        fig_spread, ax_spread = plt.subplots(figsize=(12, 6))
+                        spread_comparison.plot(ax=ax_spread, marker='o')
+                        mispricing.plot(ax=ax_spread.twinx(), kind='bar', color='grey', alpha=0.3, label='Mispricing (Original - PCA Fair)')
+                        ax_spread.set_title(f"Spread Snapshot on {analysis_date.strftime('%Y-%m-%d')} (3M, 6M, 12M)")
+                        ax_spread.set_ylabel("Spread Value")
+                        ax_spread.set_xlabel("Calendar Spread Contract")
+                        ax_spread.grid(True, linestyle='--')
+                        plt.xticks(rotation=45, ha='right')
+                        plt.tight_layout()
+                        st.pyplot(fig_spread)
 
-    else:
-        st.info("Upload files, configure the backtest parameters, and click **Run Backtest**.")
+                        # --- Detailed Spread Table ---
+                        st.markdown("###### Calendar Spread Mispricing (3M, 6M, 12M)") # Updated header
+                        detailed_comparison_spread = spread_comparison.copy()
+                        detailed_comparison_spread.index.name = 'Calendar Spread'
+                        detailed_comparison_spread['Mispricing (BPS)'] = mispricing * 10000
+                        detailed_comparison_spread = detailed_comparison_spread.rename(
+                            columns={'Original': 'Original Spread', 'PCA Fair': 'PCA Fair Spread'}
+                        )
+                        st.dataframe(
+                            detailed_comparison_spread.style.format({
+                                'Original Spread': "{:.4f}",
+                                'PCA Fair Spread': "{:.4f}",
+                                'Mispricing (BPS)': "{:.2f}"
+                            }),
+                            use_container_width=True
+                        )
 
-# --------------------------
-# FIX: Call the main function to run the Streamlit UI
-# --------------------------
-if __name__ == '__main__':
-    main()
+                    except KeyError:
+                        st.error(f"The selected analysis date **{analysis_date.strftime('%Y-%m-%d')}** is not present in the filtered price data for Spreads. Please choose a different date within the historical range.")
+                else:
+                    st.info("Not enough contracts (need 2 or more) to calculate and plot spread snapshot.")
+                    
+
+                # --- 7.3. Butterfly Mispricing ---
+                st.markdown("---")
+                st.markdown("### Butterflies (3M, 6M, 12M)")
+                
+                # Check if there are any butterflies calculated (should always be if > 2 contracts)
+                if butterflies_df.shape[1] > 0:
+                    try:
+                        original_fly_snap = butterflies_df.loc[analysis_date].dropna()
+                        pca_fair_fly_snap = pca_fair_butterflies.loc[analysis_date].dropna()
+                        
+                        # Align and calculate mispricing
+                        fly_comparison = pd.DataFrame({
+                            'Original': original_fly_snap,
+                            'PCA Fair': pca_fair_fly_snap
+                        }).dropna()
+                        
+                        mispricing = fly_comparison['Original'] - fly_comparison['PCA Fair']
+                        
+                        # Plotting
+                        fig_fly, ax_fly = plt.subplots(figsize=(12, 6))
+                        fly_comparison.plot(ax=ax_fly, marker='o')
+                        mispricing.plot(ax=ax_fly.twinx(), kind='bar', color='grey', alpha=0.3, label='Mispricing (Original - PCA Fair)')
+                        ax_fly.set_title(f"Butterfly Snapshot on {analysis_date.strftime('%Y-%m-%d')} (3M, 6M, 12M Leg)")
+                        ax_fly.set_ylabel("Butterfly Value")
+                        ax_fly.set_xlabel("Butterfly Contract")
+                        ax_fly.grid(True, linestyle='--')
+                        plt.xticks(rotation=45, ha='right')
+                        plt.tight_layout()
+                        st.pyplot(fig_fly)
+
+                        # --- Detailed Fly Table ---
+                        st.markdown("###### Butterfly (Fly) Mispricing (3M, 6M, 12M)") # Updated header
+                        detailed_comparison_fly = fly_comparison.copy()
+                        detailed_comparison_fly.index.name = 'Butterfly Contract'
+                        detailed_comparison_fly['Mispricing (BPS)'] = mispricing * 10000
+                        detailed_comparison_fly = detailed_comparison_fly.rename(
+                            columns={'Original': 'Original Fly', 'PCA Fair': 'PCA Fair Fly'}
+                        )
+                        
+                        st.dataframe(
+                            detailed_comparison_fly.style.format({
+                                'Original Fly': "{:.4f}",
+                                'PCA Fair Fly': "{:.4f}",
+                                'Mispricing (BPS)': "{:.2f}"
+                            }),
+                            use_container_width=True
+                        )
+
+                    except KeyError:
+                        st.error(f"The selected analysis date **{analysis_date.strftime('%Y-%m-%d')}** is not present in the filtered price data for Butterflies. Please choose a different date within the historical range.")
+                else:
+                    st.info("Not enough contracts (need 3 or more) to calculate and plot butterfly snapshot.")
+                    
+            else:
+                st.error("PCA failed. Please check your data quantity and quality. Need at least 100 non-NaN rows to run PCA effectively.")
