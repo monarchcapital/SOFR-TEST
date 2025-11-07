@@ -12,6 +12,7 @@ st.set_page_config(layout="wide", page_title="SOFR Futures PCA & Advanced Hedgin
 
 # --- Helper Functions for Data Processing ---
 
+@st.cache_data
 def load_data(uploaded_file):
     """Loads CSV data into a DataFrame, adapting to price or expiry file formats."""
     if uploaded_file is None:
@@ -94,6 +95,7 @@ def calculate_derivatives(df, sorted_contracts, derivative_type, gap_months):
 
 # --- PCA Core Functions ---
 
+@st.cache_data
 def perform_pca_on_prices(df, pc_count):
     """Performs PCA on the historical price levels."""
     
@@ -145,7 +147,7 @@ def reconstruct_fair_curve_from_prices(mean_prices, loadings, scores, analysis_d
         return None
     except ValueError as e:
         # If matrix dimensions don't align (shouldn't happen if logic is correct)
-        st.error(f"Error in reconstruction logic: {e}")
+        # st.error(f"Error in reconstruction logic: {e}")
         return None
 
 
@@ -156,7 +158,10 @@ def calculate_snapshot_comparison(historical_df, fair_curve_prices, analysis_dt,
         return None, None
 
     # Get original market snapshot
-    original_snapshot = historical_df.loc[analysis_dt]
+    try:
+        original_snapshot = historical_df.loc[analysis_dt]
+    except KeyError:
+        return None, None # Date not in historical data
     
     # 1. Calculate the PCA Fair Value for all instruments
     pca_fair_values = pd.Series(index=historical_df.columns)
@@ -203,6 +208,7 @@ def calculate_snapshot_comparison(historical_df, fair_curve_prices, analysis_dt,
 
 # --- Hedging Core Functions ---
 
+@st.cache_data
 def calculate_factor_sensitivities(all_instruments_df, loadings_df):
     """
     Calculates the Factor Sensitivity (Beta) for every instrument (outrights, spreads, flies)
@@ -218,6 +224,9 @@ def calculate_factor_sensitivities(all_instruments_df, loadings_df):
         
     # 2. Handle Derivatives (Spreads and Flies)
     for instrument in all_instruments_df.columns:
+        if instrument in sensitivities.index: # Skip if already processed as outright
+            continue
+            
         # Get the components and their weights
         weights = {}
         
@@ -245,6 +254,7 @@ def calculate_factor_sensitivities(all_instruments_df, loadings_df):
 
     return sensitivities
 
+@st.cache_data
 def calculate_mvhr(trade_instrument, sensitivities, scores, pc_count):
     """
     Calculates Minimum Variance Hedge Ratios (MVHR) for a trade against all hedge candidates.
@@ -257,9 +267,13 @@ def calculate_mvhr(trade_instrument, sensitivities, scores, pc_count):
     # Covariance Matrix of PC Scores (S)
     # The scores are already centered, so we can use cov() directly
     scores_k = scores.iloc[:, :pc_count]
+    # Use the covariance of the factors (scores), not the raw prices
     cov_s = scores_k.cov() * 252 # Annualize covariance (assuming daily data)
     
     # Get the Beta vector for the Trade (T)
+    if trade_instrument not in sensitivities_k.index:
+        return pd.DataFrame() # Trade not in calculated sensitivities
+        
     beta_t = sensitivities_k.loc[trade_instrument].values
     
     # Initial Volatility of the Trade (Var(T))
@@ -327,6 +341,8 @@ def solve_scenario_hedge(trade_instrument, hedge1, hedge2, sensitivities):
         A = np.array([beta_h1, beta_h2]).T 
         
         # B is the vector of trade betas (2x1)
+        # We solve for the weights h such that B_t - h1*B_h1 - h2*B_h2 = 0
+        # which simplifies to [B_h1 B_h2] * [h1 h2].T = B_t
         B = beta_t
 
         # Solve for H (h1, h2)
@@ -334,13 +350,12 @@ def solve_scenario_hedge(trade_instrument, hedge1, hedge2, sensitivities):
         h1, h2 = H[0], H[1]
         
         # Calculate the residual PC3 exposure
+        residual_pc3 = 0.0
         if 'PC3' in sensitivities.columns:
             beta_t_pc3 = sensitivities.loc[trade_instrument, 'PC3']
             beta_h1_pc3 = sensitivities.loc[hedge1, 'PC3']
             beta_h2_pc3 = sensitivities.loc[hedge2, 'PC3']
             residual_pc3 = beta_t_pc3 - h1 * beta_h1_pc3 - h2 * beta_h2_pc3
-        else:
-            residual_pc3 = 0.0
 
         return h1, h2, residual_pc3
     except np.linalg.LinAlgError:
@@ -454,8 +469,10 @@ if price_df is not None and expiry_df is not None:
         
         # 3.1 Outright Mispricing
         st.subheader("3.1 Outright Contract Mispricing (P - PCA Fair)")
-        try:
-            comparison_outright, mispricing_outright = calculate_snapshot_comparison(historical_price_df, fair_curve_prices, analysis_dt, is_outright=True)
+        
+        comparison_outright, mispricing_outright = calculate_snapshot_comparison(historical_price_df, fair_curve_prices, analysis_dt, is_outright=True)
+        
+        if comparison_outright is not None:
             
             fig_outright, ax_outright = plt.subplots(figsize=(12, 5))
             mispricing_outright.mul(10000).plot(kind='bar', ax=ax_outright, 
@@ -483,15 +500,16 @@ if price_df is not None and expiry_df is not None:
                 use_container_width=True
             )
             
-        except KeyError:
-             st.error(f"The selected analysis date **{analysis_date.strftime('%Y-%m-%d')}** is not present in the price data.")
+        else:
+             st.error(f"The selected analysis date **{analysis_date.strftime('%Y-%m-%d')}** is not present or has incomplete data for Outright contracts.")
         
         
         # 3.2 Spread Mispricing
         st.subheader("3.2 Spread Mispricing (3M Gap)")
         if not historical_spreads_df.empty:
-            try:
-                comparison_spread, mispricing_spread = calculate_snapshot_comparison(historical_spreads_df, fair_curve_prices, analysis_dt, is_outright=False)
+            comparison_spread, mispricing_spread = calculate_snapshot_comparison(historical_spreads_df, fair_curve_prices, analysis_dt, is_outright=False)
+            
+            if comparison_spread is not None:
                 fig_spread, ax_spread = plt.subplots(figsize=(12, 5))
                 mispricing_spread.mul(10000).plot(kind='bar', ax=ax_spread, 
                                                   color=np.where(mispricing_spread.mul(10000) > 0, 'green', 'red'))
@@ -509,16 +527,18 @@ if price_df is not None and expiry_df is not None:
                     detailed_comparison_spread.style.format({'Original': "{:.4f}", 'PCA Fair': "{:.4f}", 'Mispricing (BPS)': "{:.2f}"}),
                     use_container_width=True
                 )
-            except KeyError:
-                st.error(f"The selected analysis date **{analysis_date.strftime('%Y-%m-%d')}** is not present in the filtered price data for Spreads.")
+            else:
+                st.error(f"The selected analysis date **{analysis_date.strftime('%Y-%m-%d')}** is not present or has incomplete data for Spreads.")
+
         else:
             st.info("Not enough contracts (need 2 or more) to calculate spreads.")
             
         # 3.3 Butterfly Mispricing
         st.subheader("3.3 Butterfly Mispricing (3M Gap)")
         if not historical_butterflies_df.empty:
-            try:
-                comparison_fly, mispricing_fly = calculate_snapshot_comparison(historical_butterflies_df, fair_curve_prices, analysis_dt, is_outright=False)
+            comparison_fly, mispricing_fly = calculate_snapshot_comparison(historical_butterflies_df, fair_curve_prices, analysis_dt, is_outright=False)
+            
+            if comparison_fly is not None:
                 fig_fly, ax_fly = plt.subplots(figsize=(12, 5))
                 mispricing_fly.mul(10000).plot(kind='bar', ax=ax_fly, 
                                                color=np.where(mispricing_fly.mul(10000) > 0, 'green', 'red'))
@@ -536,8 +556,8 @@ if price_df is not None and expiry_df is not None:
                     detailed_comparison_fly.style.format({'Original': "{:.4f}", 'PCA Fair': "{:.4f}", 'Mispricing (BPS)': "{:.2f}"}),
                     use_container_width=True
                 )
-            except KeyError:
-                st.error(f"The selected analysis date **{analysis_date.strftime('%Y-%m-%d')}** is not present in the filtered price data for Butterflies.")
+            else:
+                st.error(f"The selected analysis date **{analysis_date.strftime('%Y-%m-%d')}** is not present or has incomplete data for Butterflies.")
         else:
             st.info("Not enough contracts (need 3 or more) to calculate butterflies.")
 
@@ -568,9 +588,10 @@ if price_df is not None and expiry_df is not None:
         st.markdown(f"Optimal hedge for **{trade_instrument}** to minimize overall volatility (factor risk).")
         
         mvhr_results = calculate_mvhr(trade_instrument, factor_sensitivities, scores, pc_count)
-        best_hedge = mvhr_results.iloc[0]
+        
 
         if not mvhr_results.empty:
+            best_hedge = mvhr_results.iloc[0]
             
             st.markdown(f"#### Best Hedge Recommendation (Risk Reduction: **{best_hedge['Risk Reduction (%)']:.2f}%**)")
             
@@ -578,13 +599,13 @@ if price_df is not None and expiry_df is not None:
             
             # Determine Final Action (Long/Short) based on trade direction and MVHR sign
             if is_long:
-                # Long trade: hedge (H) takes opposite sign of MVHR
+                # Long trade (Long T): need to short the factor exposure, so action is opposite sign of h_star
                 action = "Short" if h_star > 0 else "Long"
             else: # is_short
-                # Short trade: hedge (H) takes same sign as MVHR
+                # Short trade (Short T): need to offset the negative factor exposure, so action is same sign as h_star
                 action = "Long" if h_star > 0 else "Short"
             
-            st.success(f"To hedge 1 unit of **{trade_instrument}**, take a position of **{action} {abs(h_star):.2f} units** of the **{best_hedge['Hedge Candidate']}**.")
+            st.success(f"To hedge 1 unit of **{trade_instrument}**, take a position of **{action} {abs(h_star):.4f} units** of the **{best_hedge['Hedge Candidate']}**.")
             st.info(f"The hedged portfolio volatility is reduced from **{best_hedge['Trade Volatility (BPS)']:.2f} BPS** to **{best_hedge['Residual Volatility (BPS)']:.2f} BPS**.")
             
             with st.expander("Show All Hedge Candidates Ranked by Risk Reduction"):
@@ -597,6 +618,9 @@ if price_df is not None and expiry_df is not None:
                     }),
                     use_container_width=True
                 )
+        else:
+            st.warning("MVH calculation failed. Check if enough historical data or sufficient instruments are available.")
+
         
         # --- 4.3 Scenario-Based Hedging (PC1/PC2 Neutral) ---
         if pc_count >= 2:
@@ -607,69 +631,65 @@ if price_df is not None and expiry_df is not None:
             hedge_candidates_2x2 = [i for i in all_instruments if i != trade_instrument]
             
             col_h1, col_h2 = st.columns(2)
-            with col_h1:
-                # Find the index of the best MVH candidate to use as a default
-                best_hedge_name = best_hedge['Hedge Candidate'] if not mvhr_results.empty else hedge_candidates_2x2[0]
-                default_h1_idx = hedge_candidates_2x2.index(best_hedge_name) if best_hedge_name in hedge_candidates_2x2 else 0
-                hedge1 = st.selectbox("Select Hedge Candidate 1 (H1)", hedge_candidates_2x2, index=default_h1_idx)
             
-            with col_h2:
-                # Ensure H2 is not the same as H1
-                default_h2_idx = (default_h1_idx + 1) % len(hedge_candidates_2x2)
-                if len(hedge_candidates_2x2) > 1 and hedge1 == hedge_candidates_2x2[default_h2_idx]:
-                    default_h2_idx = (default_h2_idx + 1) % len(hedge_candidates_2x2)
-                
-                # Ensure index is within bounds for the selectbox
-                default_h2_idx = min(default_h2_idx, len(hedge_candidates_2x2) - 1) if len(hedge_candidates_2x2) > 0 else 0
-                
-                hedge2 = st.selectbox("Select Hedge Candidate 2 (H2)", hedge_candidates_2x2, index=default_h2_idx)
-
-            if hedge1 != hedge2:
-                h1, h2, residual_pc3 = solve_scenario_hedge(trade_instrument, hedge1, hedge2, factor_sensitivities)
-                
-                if h1 is not None:
-                    
-                    st.markdown("##### Required Hedge Weights (Hedge 1 & 2 per 1 Unit of Trade)")
-
-                    # Determine Final Action (Long/Short) for H1 and H2 based on trade direction
-                    
-                    # For a Long Trade: Portfolio is T - h1*H1 - h2*H2. Weights h1, h2 are required to zero out betas.
-                    # The action taken in H1/H2 is short if h > 0, long if h < 0.
-                    # For a Short Trade: Portfolio is -T + h1*H1 + h2*H2. The weights are mathematically h1, h2 but the sign of the trade is reversed.
-                    # To maintain the factor neutrality relative to the market move, the signs of h1 and h2 must be flipped
-                    
-                    # Simplified logic: The calculated h1, h2 are for the Long position (T).
-                    # If trade is Long: Action is opposite sign of h
-                    # If trade is Short: Action is same sign of h (reverse of the reversal)
-                    
-                    if is_long:
-                        action_h1 = "Short" if h1 > 0 else "Long"
-                        action_h2 = "Short" if h2 > 0 else "Long"
-                    else:
-                        action_h1 = "Long" if h1 > 0 else "Short"
-                        action_h2 = "Long" if h2 > 0 else "Short"
-
-                    
-                    st.dataframe(
-                        pd.DataFrame({
-                            'Hedge Instrument': [hedge1, hedge2],
-                            'Required Units': [f"{abs(h1):.4f}", f"{abs(h2):.4f}"],
-                            'Action': [action_h1, action_h2]
-                        }, index=['H1', 'H2']),
-                        use_container_width=True
-                    )
-                    
-                    st.markdown("---")
-                    st.info(f"The resulting portfolio is neutral to PC1 (Level) and PC2 (Slope). The residual exposure to PC3 (Curve) is **{residual_pc3:.4f}**.")
-                    
-                    if not is_long:
-                        st.warning("Note: Since your trade direction is **Short**, the hedge actions shown maintain the factor neutrality. Mathematically, the weights were calculated for the **Long** trade, but the actions have been **reversed** to match the Short position's factor exposures.")
-
-                
-                else:
-                    st.warning("Could not solve the hedge system. This typically happens if the two hedge candidates are too correlated (e.g., adjacent outright contracts) or PC1/PC2 factors are not available.")
+            if not hedge_candidates_2x2:
+                st.warning("Not enough distinct instruments to form a 2-factor hedge (need at least two hedge candidates different from the trade).")
             else:
-                st.error("Please select two different hedge candidates.")
+                with col_h1:
+                    # Attempt to default to the best MVH candidate
+                    best_hedge_name = best_hedge['Hedge Candidate'] if 'best_hedge' in locals() and not mvhr_results.empty else hedge_candidates_2x2[0]
+                    default_h1_idx = hedge_candidates_2x2.index(best_hedge_name) if best_hedge_name in hedge_candidates_2x2 else 0
+                    hedge1 = st.selectbox("Select Hedge Candidate 1 (H1)", hedge_candidates_2x2, index=default_h1_idx)
+                
+                with col_h2:
+                    # Ensure H2 is not the same as H1, defaulting to the next available instrument
+                    if len(hedge_candidates_2x2) > 1:
+                        default_h2_idx = (default_h1_idx + 1) % len(hedge_candidates_2x2)
+                        if hedge1 == hedge_candidates_2x2[default_h2_idx]:
+                            default_h2_idx = (default_h2_idx + 1) % len(hedge_candidates_2x2)
+                    else:
+                        default_h2_idx = 0 # Fallback if only one candidate
+                        
+                    hedge2 = st.selectbox("Select Hedge Candidate 2 (H2)", hedge_candidates_2x2, index=default_h2_idx)
+
+                if hedge1 != hedge2:
+                    h1, h2, residual_pc3 = solve_scenario_hedge(trade_instrument, hedge1, hedge2, factor_sensitivities)
+                    
+                    if h1 is not None:
+                        
+                        st.markdown("##### Required Hedge Weights (Hedge 1 & 2 per 1 Unit of Trade)")
+
+                        # If trade is Long: Action is opposite sign of h1, h2 (since T - h1*H1 - h2*H2 = 0)
+                        # If trade is Short: Action is same sign of h1, h2 (since -T + h1*H1 + h2*H2 = 0)
+                        
+                        if is_long:
+                            action_h1 = "Short" if h1 > 0 else "Long"
+                            action_h2 = "Short" if h2 > 0 else "Long"
+                        else:
+                            action_h1 = "Long" if h1 > 0 else "Short"
+                            action_h2 = "Long" if h2 > 0 else "Short"
+
+                        
+                        st.dataframe(
+                            pd.DataFrame({
+                                'Hedge Instrument': [hedge1, hedge2],
+                                'Required Units': [f"{abs(h1):.4f}", f"{abs(h2):.4f}"],
+                                'Action': [action_h1, action_h2]
+                            }, index=['H1', 'H2']),
+                            use_container_width=True
+                        )
+                        
+                        st.markdown("---")
+                        st.info(f"The resulting portfolio is neutral to PC1 (Level) and PC2 (Slope). The residual exposure to PC3 (Curve) is **{residual_pc3:.4f}**.")
+                        
+                        if not is_long:
+                            st.warning("Note: Since your trade direction is **Sell (Short)**, the hedge actions shown maintain the factor neutrality relative to the market move. The sign of the hedge units has been **flipped** compared to a calculation for a Long trade.")
+
+                    
+                    else:
+                        st.warning("Could not solve the hedge system. This typically happens if the two hedge candidates are too linearly dependent (e.g., identical or perfectly correlated instruments). Try selecting two instruments with distinct maturities or different derivative types.")
+                else:
+                    st.error("Please select two different hedge candidates.")
             
         else:
             st.info("Requires at least 2 Principal Components to calculate Level/Slope Neutrality.")
