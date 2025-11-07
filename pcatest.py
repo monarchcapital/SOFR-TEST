@@ -548,6 +548,33 @@ def calculate_factor_sensitivities(loadings_df_gen, pc_count):
     # to the standardized PC score. We can treat these as the factor exposures.
     return factor_sensitivities
 
+def find_optimal_factor_hedge(trade_label, factor_sensitivities_df, factor_name):
+    """
+    Finds the instrument (excluding the trade itself) with the highest 
+    absolute sensitivity to the specified factor, which serves as the optimal hedge.
+    
+    Returns: optimal_hedge_label, optimal_hedge_sensitivity, error_msg
+    """
+    if factor_name not in factor_sensitivities_df.columns:
+        return None, 0.0, "Factor column not found."
+    
+    # 1. Calculate absolute sensitivity and filter out the trade instrument
+    # Use .abs() on the Series containing sensitivities to the specific factor
+    abs_sensitivities = factor_sensitivities_df[factor_name].abs()
+    hedge_candidates_abs = abs_sensitivities.drop(trade_label, errors='ignore')
+    
+    if hedge_candidates_abs.empty:
+        return None, 0.0, "No other instruments available to use as a hedge."
+
+    # 2. Find the instrument with the maximum absolute sensitivity
+    optimal_hedge_label = hedge_candidates_abs.idxmax()
+    
+    # 3. Get the raw sensitivity (not absolute) of the optimal hedge for the ratio calculation
+    optimal_hedge_sensitivity = factor_sensitivities_df.loc[optimal_hedge_label, factor_name]
+    
+    return optimal_hedge_label, optimal_hedge_sensitivity, None
+
+
 def calculate_factor_hedge_ratio(trade_label, hedge_label, factor_sensitivities_df, factor_name):
     """
     Calculates the hedge ratio k_factor to neutralize the factor exposure.
@@ -563,7 +590,7 @@ def calculate_factor_hedge_ratio(trade_label, hedge_label, factor_sensitivities_
     Hedge_Exposure = factor_sensitivities_df.loc[hedge_label, factor_name]
     
     if abs(Hedge_Exposure) < 1e-9: # Avoid division by near-zero
-        return None, "Hedge instrument has negligible sensitivity to this factor."
+        return None, "Hedge instrument has negligible sensitivity to this factor. Select a different factor or trade."
         
     # k_factor is the ratio of sensitivities
     k_factor = Trade_Exposure / Hedge_Exposure
@@ -1204,7 +1231,7 @@ if not price_df_filtered.empty:
             
             * **Factor View:** Hedge is used to remove sensitivity to the selected factor.
             * **Trade:** Long 1 unit of the selected instrument.
-            * **Hedge:** Short $k_{{factor}}$ units of the automatically selected optimal instrument.
+            * **Hedge:** Short $k_{{factor}}$ units of the **automatically selected optimal instrument**.
             * **Formula:** $k_{{factor}} = \\frac{{\\text{{Sensitivity}}(\\text{{Trade}}, \\text{{Factor}})}}{{\\text{{Sensitivity}}(\\text{{Optimal Hedge}}, \\text{{Factor}})}}$
         """)
         
@@ -1240,28 +1267,21 @@ if not price_df_filtered.empty:
                     key='factor_select_auto' 
                 )
             
+            # --- Auto-Determine Optimal Hedge ---
+            optimal_hedge_label, optimal_hedge_sensitivity, search_error = find_optimal_factor_hedge(
+                trade_selection_factor, 
+                factor_sensitivities_df, 
+                factor_selection
+            )
+            
+            # The hedge selection is now a calculated value, not a user input
+            hedge_selection_factor = optimal_hedge_label
+            
             st.markdown("---")
             
-            # 3. Automatic Best Hedge Selection and Hedge Ratio Calculation
-            if trade_selection_factor and factor_selection:
+            # 3. Calculate Hedge Ratio
+            if trade_selection_factor and hedge_selection_factor and factor_selection:
                 
-                # Find the Best Hedge Candidate
-                sensitivities_to_factor = factor_sensitivities_df[factor_selection]
-                
-                # Exclude the trade itself
-                hedge_candidates = sensitivities_to_factor.drop(trade_selection_factor, errors='ignore') 
-                
-                # --- CORRECTED LOGIC FOR BEST HEDGE SELECTION ---
-                # Find the instrument with the highest absolute sensitivity (best hedge)
-                if hedge_candidates.empty:
-                    st.error("Cannot select a hedge instrument: The trade is the only available instrument.")
-                    st.stop()
-                    
-                # Use .abs().idxmax() to find the index of the largest absolute value
-                best_hedge_label = hedge_candidates.abs().idxmax()
-                hedge_selection_factor = best_hedge_label # The optimal hedge
-                
-                # 4. Calculate Hedge Ratio
                 k_factor, error_msg = calculate_factor_hedge_ratio(
                     trade_selection_factor, 
                     hedge_selection_factor, 
@@ -1277,15 +1297,15 @@ if not price_df_filtered.empty:
                     hedge_sens = factor_sensitivities_df.loc[hedge_selection_factor, factor_selection]
                     
                     st.markdown(f"""
-                        The optimal hedge instrument is chosen as **{best_hedge_label}** because it has the **highest absolute sensitivity** to the **{factor_selection}** factor ({abs(hedge_sens):.4f}), making it the most efficient instrument to use for neutralization.
+                        The optimal hedge instrument is chosen as **{optimal_hedge_label}** because it has the **highest absolute sensitivity** to the **{factor_selection}** factor (**{abs(hedge_sens):.4f}**), making it the most efficient instrument to use for neutralization.
                         
                         * **Trade:** Long 1 unit of **{trade_selection_factor}** (Sensitivity: **{trade_sens:.4f}**)
-                        * **Hedge Action:** Short **{k_factor:.4f}** units of the **Optimal Hedge Instrument** (**{best_hedge_label}**)
+                        * **Hedge Action:** Short **{k_factor:.4f}** units of the **Optimal Hedge Instrument** (**{optimal_hedge_label}**)
                     """)
                     
                     st.markdown("---")
                     
-                    # 5. Display Full Sensitivities Table
+                    # 4. Display Full Sensitivities Table
                     st.subheader(f"Factor Sensitivities (Standardized Beta) Table")
                     st.markdown("The values below are the standardized exposures of each instrument to the three main risk factors. A positive value means the instrument moves in the same direction as the factor.")
                     
