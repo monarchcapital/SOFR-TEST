@@ -118,6 +118,7 @@ def calculate_k_step_butterflies(analysis_curve_df, k):
     """
     Calculates butterflies using contracts separated by 'k' steps (e.g., k=1 for 3M fly, k=2 for 6M fly, k=4 for 12M fly).
     Formula: C_i - 2 * C_{i+k} + C_{i+2k}
+    Label Format: C_i-2xC_{i+k}+C_{i+2k}
     """
     if analysis_curve_df.empty or analysis_curve_df.shape[1] < 2 * k + 1:
         return pd.DataFrame()
@@ -204,7 +205,12 @@ def perform_pca_on_prices(price_df):
 # --- RECONSTRUCTION LOGIC ---
 
 def _reconstruct_derivative(original_df, reconstructed_prices, derivative_type='spread'):
-    """Helper to reconstruct a derivative from the reconstructed price curve."""
+    """
+    Helper to reconstruct a derivative from the reconstructed price curve.
+    
+    NOTE: FIX applied here to correctly parse the generalized k-step butterfly label
+    (e.g., Z25-2xM26+Z26) which caused the IndexError in the previous attempt.
+    """
     if original_df.empty:
         return pd.DataFrame()
 
@@ -215,24 +221,40 @@ def _reconstruct_derivative(original_df, reconstructed_prices, derivative_type='
     for label in original_df_aligned.columns:
         
         if derivative_type == 'spread':
-            # Spread: C_i - C_{i+k}. Label is C_i-C_{i+k}
+            # Spread: C_i - C_{i+k}. Label is C_i-C_{i+k} (e.g., Z25-M26)
             c1, c_long = label.split('-')
             reconstructed_data[label + ' (PCA)'] = (
                 reconstructed_prices[c1 + ' (PCA)'] - reconstructed_prices[c_long + ' (PCA)']
             )
         
         elif derivative_type == 'fly':
-            # Fly: C_i - 2*C_{i+k} + C_{i+2k}. Label is C_i-2xC_{i+k}+C_{i+2k}
-            parts = label.split('-')
-            c1 = parts[0] # C_i
-            c2_label = parts[1].split('x')[1] # C_{i+k}
-            c3_label = parts[2].split('+')[1] # C_{i+2k}
+            # Fly: C_i - 2 * C_{i+k} + C_{i+2k}. Label format: C_i-2xC_{i+k}+C_{i+2k}
+            # Example: Z25-2xM26+Z26
             
-            reconstructed_data[label + ' (PCA)'] = (
-                reconstructed_prices[c1 + ' (PCA)'] - 
-                2 * reconstructed_prices[c2_label + ' (PCA)'] + 
-                reconstructed_prices[c3_label + ' (PCA)']
-            )
+            try:
+                # 1. Split on the first '-' to get ['C_i', '2xC_{i+k}+C_{i+2k}']
+                parts = label.split('-', 1) 
+                c1 = parts[0] # C_i
+                
+                # 2. Split the second part by '+' to get ['2xC_{i+k}', 'C_{i+2k}']
+                sub_parts = parts[1].split('+')
+                
+                # 3. Extract C_{i+k} from '2xC_{i+k}'
+                c2_label = sub_parts[0].split('x')[1] 
+                
+                # 4. Extract C_{i+2k}
+                c3_label = sub_parts[1] 
+                
+                # Reconstruct the derivative
+                reconstructed_data[label + ' (PCA)'] = (
+                    reconstructed_prices[c1 + ' (PCA)'] - 
+                    2 * reconstructed_prices[c2_label + ' (PCA)'] + 
+                    reconstructed_prices[c3_label + ' (PCA)']
+                )
+            except Exception as e:
+                 # Skip if reconstruction fails due to malformed label or missing price
+                 print(f"Skipping fly reconstruction for {label}: Error {e}")
+                 continue 
     
     reconstructed_df = pd.DataFrame(reconstructed_data, index=reconstructed_prices.index)
     
@@ -371,15 +393,15 @@ if not price_df_filtered.empty:
     # 3. Calculate Derivatives
     st.header("1. Data Derivatives Check (Contracts relevant to selected Analysis Date)")
     
-    # 3M (k=1)
+    # 3M (k=1) - Used for PCA input
     spreads_3M_df = calculate_k_step_spreads(analysis_curve_df, 1)
     butterflies_3M_df = calculate_k_step_butterflies(analysis_curve_df, 1)
     
-    # 6M (k=2)
+    # 6M (k=2) - Requested sections 5.4, 5.5
     spreads_6M_df = calculate_k_step_spreads(analysis_curve_df, 2)
     butterflies_6M_df = calculate_k_step_butterflies(analysis_curve_df, 2)
     
-    # 12M (k=4)
+    # 12M (k=4) - Requested sections 5.6, 5.7
     spreads_12M_df = calculate_k_step_spreads(analysis_curve_df, 4)
     butterflies_12M_df = calculate_k_step_butterflies(analysis_curve_df, 4)
     
@@ -434,9 +456,10 @@ if not price_df_filtered.empty:
         st.markdown("""
             This heatmap shows the **Loadings (Eigenvectors)** of the first few PCs on each **3-Month Spread**. These weights are derived from **Standardized PCA** and represent how each spread contributes to the overall risk factors (Level, Slope, Curvature).
             
-            * **Interpretation of PC1 (Level):** Loadings are typically all **positive and uniform** across most spreads. This means that when the PC1 score increases, **all spreads tend to move in the same direction** (i.e., the entire forward curve shifts).
-            * **Interpretation of PC2 (Slope):** Loadings are typically **negative for short-end spreads** and **positive for long-end spreads**. This means that when the PC2 score increases, **short-end spreads flatten** while **long-end spreads steepen**, causing the overall slope of the curve to change.
-            * **Interpretation of PC3 (Curvature):** Loadings show a **pattern of positive/negative/positive** or similar inversions, representing a 'bowing' or 'humping' of the curve.
+            * **Interpretation of Loadings (Weights):** The value of the loading (weight) indicates the **sensitivity** of that specific spread to the respective Principal Component. A high absolute value means the spread has historically been highly correlated with the movement of that PC factor.
+            * **Example: PC1 (Level/Parallel Shift):** Loadings are typically all **positive and uniform** across most spreads. This means that when the PC1 score increases, **all spreads tend to move in the same direction** (e.g., the entire forward curve shifts up or down in a parallel manner).
+            * **Example: PC2 (Slope/Twist):** Loadings are typically **negative for short-end spreads** and **positive for long-end spreads**. This means that when the PC2 score increases, the **short-end flattens** while the **long-end steepens**, causing the overall slope of the curve to change.
+            * **Example: PC3 (Curvature/Bow):** Loadings show a **pattern of positive/negative/positive** or similar inversions, representing a 'bowing' or 'humping' of the curve (e.g., short and long ends move in one direction while the belly moves in the opposite).
         """)
         
         plt.style.use('default') 
@@ -466,8 +489,8 @@ if not price_df_filtered.empty:
         st.markdown(f"""
             This heatmap shows the **independent sensitivity** of each **outright contract price** to the principal components. This result is based on **Unstandardized PCA (Covariance Matrix)**, meaning the weights reflect the **absolute historical price volatility and duration** of each contract.
             
-            * **Interpretation of PC1 (Non-Uniform Level):** The loadings are highly **non-uniform**, increasing with maturity. The weight on the shortest contract is small, while the weight on the longest contract is largest. This reflects that **long-dated contracts have historically experienced larger absolute price moves** (higher duration/volatility) than short-dated contracts.
-            * **Interpretation of PC2/PC3:** These components tend to capture higher-order curve shape changes, but they may not cleanly align with Slope/Curvature when using Unstandardized PCA.
+            * **Interpretation of Loadings (Weights):** The value here represents the raw eigenvector weight, indicating the **absolute magnitude** of historical price movement for that contract that is captured by the PC.
+            * **Example: PC1 (Non-Uniform Level):** The loadings are highly **non-uniform**, increasing significantly with maturity. The weight on the shortest contract is small, while the weight on the longest contract is largest. This happens because **long-dated contracts have historically experienced larger absolute price moves** (higher duration/volatility) than short-dated contracts, and unstandardized PCA captures this absolute movement.
             
             **PC1 Explained Variance (Absolute Price):** **{pc1_outright_variance:.2f}%**
         """)
@@ -735,13 +758,13 @@ if not price_df_filtered.empty:
 
         
         # --- 5.2 Spread Snapshot (3M) ---
-        st.subheader("5.2 3M Spread Snapshot (k=1)")
+        st.subheader("5.2 3M Spread Snapshot (k=1, e.g., Z25-H26)")
         plot_snapshot(historical_spreads_3M_df, "3M Spread", analysis_dt, pc_count)
 
 
         # --- 5.3 Butterfly (Fly) Snapshot (3M) ---
         if not historical_butterflies_3M_df.empty:
-            st.subheader("5.3 3M Butterfly (Fly) Snapshot (k=1)")
+            st.subheader("5.3 3M Butterfly (Fly) Snapshot (k=1, e.g., Z25-2xH26+M26)")
             plot_snapshot(historical_butterflies_3M_df, "3M Butterfly", analysis_dt, pc_count)
         else:
             st.info("Not enough contracts (need 3 or more) to calculate and plot 3M butterfly snapshot.")
