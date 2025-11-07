@@ -288,6 +288,16 @@ def transform_and_reconstruct(data_df, pca_model, data_mean, data_std, num_pcs):
     # 2. Calculate PC Scores
     # Note: We must use the full fitted components length here, not num_pcs
     n_fitted_components = pca_model.components_.shape[0]
+    
+    # --- FIX: Defensive check for empty data_clean before transformation ---
+    if data_clean.empty:
+        # If no clean data, return empty structures with correct columns/index
+        st.warning("No complete rows of derivative data found for PCA scoring. Returning empty score/reconstruction DataFrames.")
+        empty_reconstructed = pd.DataFrame(index=data_df.index, columns=data_df.columns)
+        empty_scores = pd.DataFrame(index=data_df.index, columns=[f'PC{i+1}' for i in range(n_fitted_components)])
+        return empty_reconstructed, empty_scores
+    # ----------------------------------------------------------------------
+    
     scores = pd.DataFrame(
         pca_model.transform(data_clean),
         index=data_clean.index,
@@ -301,8 +311,6 @@ def transform_and_reconstruct(data_df, pca_model, data_mean, data_std, num_pcs):
         selected_scores[cols_to_zero] = 0.0
     
     # 4. Reconstruct: Scores * Loadings.T + Mean (rescale)
-    # Reconstructed scaled data = Scores @ Loadings (using only the components in selected_scores)
-    
     # Ensure components array matches the columns in selected_scores
     components_to_use = pca_model.components_[:selected_scores.shape[1], :]
     
@@ -391,7 +399,7 @@ expiry_data = load_data(uploaded_expiry_file, 'expiry')
 
 if price_data is not None and expiry_data is not None:
     
-    # --- ERROR FIX: Check index type before calling .date() ---
+    # --- Check index type before calling .date() ---
     if isinstance(price_data.index, pd.DatetimeIndex):
         max_date = price_data.index.max().date()
         
@@ -405,7 +413,6 @@ if price_data is not None and expiry_data is not None:
     else:
         st.error("Price data index is not recognized as a DatetimeIndex. Please ensure the first column of your price file is a date.")
         st.stop()
-    # --- END ERROR FIX ---
     
     # --- 2. Data Filtering and Preprocessing ---
     
@@ -428,7 +435,7 @@ if price_data is not None and expiry_data is not None:
         st.dataframe(price_data.tail(), use_container_width=True)
 
 
-        # --- 3. PCA Setup: Calculate Spreads and Butterflies (MODIFIED to include 6M, 12M) ---
+        # --- 3. PCA Setup: Calculate Spreads and Butterflies ---
         
         # Calculate 3M, 6M, and 12M Spreads
         spreads_3m_df = calculate_outright_spreads(price_data, gap_contracts=1)
@@ -540,6 +547,11 @@ if price_data is not None and expiry_data is not None:
                 derivatives_df, pca, data_mean, data_std, num_pcs=n_components
             )
             
+            # Check for empty reconstruction before proceeding to snapshot analysis
+            if reconstructed_derivatives_selected.empty:
+                st.error("Cannot perform snapshot analysis: Reconstructed data is empty. Check data quality and time range.")
+                st.stop()
+            
             # Get the fair value curve (prices, spreads, flies)
             (
                 pca_fair_prices, 
@@ -552,7 +564,7 @@ if price_data is not None and expiry_data is not None:
             )
 
 
-            # --- 6. Outright Price Mispricing Snapshot (NEW SEPARATE SECTION) ---
+            # --- 6. Outright Price Mispricing Snapshot ---
             st.markdown("---")
             st.header("6. Outright Price Mispricing Snapshot")
             
@@ -599,7 +611,7 @@ if price_data is not None and expiry_data is not None:
                 st.error(f"The selected analysis date **{analysis_date.strftime('%Y-%m-%d')}** is not present in the filtered price data. Please choose a different date within the historical range.")
             
             
-            # --- 7. Calendar Spread Mispricing Snapshot (NEW SEPARATE SECTION) ---
+            # --- 7. Calendar Spread Mispricing Snapshot ---
             st.markdown("---")
             st.header("7. Calendar Spread Mispricing Snapshot (3M, 6M, 12M)")
             
@@ -650,7 +662,7 @@ if price_data is not None and expiry_data is not None:
                 st.info("Not enough contracts (need 2 or more) to calculate and plot spread snapshot.")
                 
 
-            # --- 8. Butterfly Mispricing Snapshot (NEW SEPARATE SECTION) ---
+            # --- 8. Butterfly Mispricing Snapshot ---
             st.markdown("---")
             st.header("8. Butterfly Mispricing Snapshot (3M, 6M, 12M Leg)")
             
