@@ -779,7 +779,7 @@ if not price_df_filtered.empty:
 
         # 3. Reconstruct All Products (Outright Prices, Spreads, Flies)
         # We pass the full map of all derivatives for general reconstruction
-        historical_outrights_df, historical_spreads_df, historical_butterflies_df, historical_derivatives_map = \
+        historical_outrights_df, historical_spreads_df, historical_butterflies_df_old, historical_derivatives_map = \
             reconstruct_prices_and_derivatives(
                 analysis_curve_df, 
                 reconstructed_spreads_df, 
@@ -898,7 +898,8 @@ if not price_df_filtered.empty:
         
         # --- 7.2 Spread Snapshot ---
         st.subheader("7.2 Outright Spread Snapshot (e.g., Z20-H21)")
-        historical_spreads_df = historical_derivatives_map.get('Outright Spreads')
+        # FIX: Ensure we retrieve a DataFrame, even if empty, to prevent AttributeError
+        historical_spreads_df = historical_derivatives_map.get('Outright Spreads', pd.DataFrame()) 
         
         if historical_spreads_df.empty:
             st.warning("Outright Spreads could not be reconstructed. Skipping snapshot.")
@@ -985,7 +986,8 @@ if not price_df_filtered.empty:
 
         # --- 7.3 Butterfly (Fly) Snapshot (Outright / 3-Month) ---
         st.subheader("7.3 Outright Butterfly (Fly) Snapshot (e.g., Z20-2xH21+M21)")
-        historical_butterflies_df = historical_derivatives_map.get('Outright Butterflies')
+        # FIX: Ensure we retrieve a DataFrame, even if empty, to prevent AttributeError
+        historical_butterflies_df = historical_derivatives_map.get('Outright Butterflies', pd.DataFrame()) 
 
         if historical_butterflies_df.empty:
             st.info("Not enough contracts (need 3 or more) to calculate or reconstruct the Outright Butterfly.")
@@ -1080,11 +1082,12 @@ if not price_df_filtered.empty:
         starting_sub_section_num = 4 
 
         for i, derivative_type in enumerate(custom_derivative_types):
-            historical_data = historical_derivatives_map.get(derivative_type)
+            # FIX: Ensure we retrieve a DataFrame, even if empty, to prevent AttributeError
+            historical_data = historical_derivatives_map.get(derivative_type, pd.DataFrame()) 
             
             st.subheader(f"7.{starting_sub_section_num + i}. {derivative_type} Snapshot")
             
-            if historical_data is None or historical_data.empty:
+            if historical_data.empty:
                 # Check if the reason is lack of contracts
                 if derivative_type == '6-Month Spreads' and analysis_curve_df.shape[1] < 3:
                      st.info(f"No derivative contracts could be constructed for {derivative_type} from the available curve. Need at least 3 contracts (e.g., Z5, H6, M6) for one 6-month spread (Z5-M6).")
