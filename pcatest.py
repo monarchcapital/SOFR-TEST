@@ -151,7 +151,6 @@ def calculate_butterflies(analysis_curve_df):
         flies_data[fly_label] = analysis_curve_df.iloc[:, i] - 2 * analysis_curve_df.iloc[:, i+1] + analysis_curve_df.iloc[:, i+2]
 
     return pd.DataFrame(flies_data)
-
 # --- NEW HELPER FUNCTION: Calculate Custom Spreads ---
 def calculate_custom_spreads(analysis_curve_df, contract_labels, months_span):
     """
@@ -164,8 +163,7 @@ def calculate_custom_spreads(analysis_curve_df, contract_labels, months_span):
     num_contracts = len(contract_labels)
     custom_spreads_data = {}
     
-    # Determine the contract offset based on the CME convention (4 contracts per year)
-    # 3 months between contracts: H(Mar), M(Jun), U(Sep), Z(Dec)
+    # Determine the contract offset based on the CME convention (4 contracts per year, 3 months between)
     if months_span == 6:
         offset = 2 # 6 months = 2 contracts
     elif months_span == 12:
@@ -210,7 +208,7 @@ def calculate_custom_butterflies(analysis_curve_df, contract_labels, months_span
         return pd.DataFrame() # Unsupported span
     
     # The fly requires 3 contracts: C1, C2 (C1 + offset), C3 (C2 + offset = C1 + 2*offset)
-    required_span = 2 * offset # Total index span needed: 4 for 6-month fly, 8 for 12-month fly
+    required_span_offset = 2 * offset # Total index span needed: 4 for 6-month fly, 8 for 12-month fly
 
     for i in range(num_contracts):
         # C1 (Short) is at index i
@@ -219,8 +217,8 @@ def calculate_custom_butterflies(analysis_curve_df, contract_labels, months_span
         # C2 (Center) is at index i + offset
         index_c2 = i + offset
         
-        # C3 (Long) is at index i + required_span
-        index_c3 = i + required_span
+        # C3 (Long) is at index i + required_span_offset
+        index_c3 = i + required_span_offset
         
         if index_c3 < num_contracts:
             c1_maturity = contract_labels[index_c1]
@@ -233,7 +231,7 @@ def calculate_custom_butterflies(analysis_curve_df, contract_labels, months_span
             flies_data[fly_label] = analysis_curve_df[c1_maturity] - 2 * analysis_curve_df[c2_maturity] + analysis_curve_df[c3_maturity]
 
     return pd.DataFrame(flies_data)
-
+    
 def perform_pca(data_df):
     """Performs PCA on the input DataFrame (expected to be spreads)."""
     # Drop rows with NaNs before standardization and PCA
@@ -334,7 +332,7 @@ def calculate_outright_loadings(loadings_df, contract_labels):
     return outright_loadings.astype(float)
 
 
-def reconstruct_prices_and_derivatives(analysis_curve_df, reconstructed_spreads_df, derivatives_to_reconstruct, pc_count, loadings_df, scores_df):
+def reconstruct_prices_and_derivatives(analysis_curve_df, reconstructed_spreads_df, derivatives_to_reconstruct, pc_count):
     """
     Reconstructs Outright Prices and Derivatives historically using a general PCA factor model.
     The outright price reconstruction is anchored to the original nearest contract price path (Level factor).
@@ -384,7 +382,9 @@ def reconstruct_prices_and_derivatives(analysis_curve_df, reconstructed_spreads_
         # Calculate the PCA Fair value for the derivative using the outright price reconstruction
         if derivative_type == 'Outright Spreads':
             # Outright Spreads (S_i-1,i) are simply the reconstructed spreads from step 1
-            reconstructed_deriv = reconstructed_spreads_df.loc[original_df_aligned.index, original_df_aligned.columns]
+            # We must align the columns to ensure they match exactly
+            spread_cols = [col for col in original_df_aligned.columns if col in reconstructed_spreads_df.columns]
+            reconstructed_deriv = reconstructed_spreads_df.loc[original_df_aligned.index, spread_cols]
             
         elif 'Spread' in derivative_type:
             # Calculate custom spread from reconstructed outright prices
@@ -770,7 +770,7 @@ if not price_df_filtered.empty:
 
         derivatives_to_reconstruct = {
             'Outright Spreads': spreads_df,
-            'Outright Butterflies': butterflies_df,
+            'Outright Butterflies': butterflies_df, # Standard 3-month flies
             '6-Month Spreads': spreads_6m_df,
             '12-Month Spreads': spreads_12m_df,
             '6-Month Butterflies': flies_6m_df,
@@ -778,14 +778,13 @@ if not price_df_filtered.empty:
         }
 
         # 3. Reconstruct All Products (Outright Prices, Spreads, Flies)
+        # We pass the full map of all derivatives for general reconstruction
         historical_outrights_df, historical_spreads_df, historical_butterflies_df, historical_derivatives_map = \
             reconstruct_prices_and_derivatives(
                 analysis_curve_df, 
                 reconstructed_spreads_df, 
                 derivatives_to_reconstruct,
-                pc_count,
-                loadings,
-                scores # Keep the function signature for full compatibility
+                pc_count
             )
 
         
@@ -899,91 +898,98 @@ if not price_df_filtered.empty:
         
         # --- 7.2 Spread Snapshot ---
         st.subheader("7.2 Outright Spread Snapshot (e.g., Z20-H21)")
+        historical_spreads_df = historical_derivatives_map.get('Outright Spreads')
+        
+        if historical_spreads_df.empty:
+            st.warning("Outright Spreads could not be reconstructed. Skipping snapshot.")
+        else:
+            try:
+                # 1. Select the single day's data, ensuring DataFrame structure
+                spread_snapshot_original = historical_spreads_df.filter(regex='\(Original\)$').loc[[analysis_dt]].T
+                spread_snapshot_pca = historical_spreads_df.filter(regex='\(PCA\)$').loc[[analysis_dt]].T
+                
+                # 2. Rename column (which is the datetime key) and clean the index labels
+                spread_snapshot_original.columns = ['Original']
+                spread_snapshot_original.index = spread_snapshot_original.index.str.replace(r'\s\(Original\)$', '', regex=True)
 
-        try:
-            # 1. Select the single day's data, ensuring DataFrame structure
-            spread_snapshot_original = historical_spreads_df.filter(regex='\(Original\)$').loc[[analysis_dt]].T
-            spread_snapshot_pca = historical_spreads_df.filter(regex='\(PCA\)$').loc[[analysis_dt]].T
-            
-            # 2. Rename column (which is the datetime key) and clean the index labels
-            spread_snapshot_original.columns = ['Original']
-            spread_snapshot_original.index = spread_snapshot_original.index.str.replace(r'\s\(Original\)$', '', regex=True)
+                spread_snapshot_pca.columns = ['PCA Fair']
+                spread_snapshot_pca.index = spread_snapshot_pca.index.str.replace(r'\s\(PCA\)$', '', regex=True)
 
-            spread_snapshot_pca.columns = ['PCA Fair']
-            spread_snapshot_pca.index = spread_snapshot_pca.index.str.replace(r'\s\(PCA\)$', '', regex=True)
-
-            # 3. Concatenate and drop NaNs
-            spread_comparison = pd.concat([spread_snapshot_original, spread_snapshot_pca], axis=1).dropna()
-            
-            if spread_comparison.empty:
-                st.warning(f"No complete Spread data available for the selected analysis date {analysis_date.strftime('%Y-%m-%d')} after combining Original and PCA Fair values.")
-            else:
-                # --- Plot the Spreads ---
-                fig_spread, ax_spread = plt.subplots(figsize=(15, 7))
+                # 3. Concatenate and drop NaNs
+                spread_comparison = pd.concat([spread_snapshot_original, spread_snapshot_pca], axis=1).dropna()
                 
-                # Plot Original Spread
-                ax_spread.plot(spread_comparison.index, spread_comparison['Original'], 
-                              label='Original Market Spread', marker='o', linestyle='-', linewidth=2.5, color='darkgreen')
-                
-                # Plot PCA Fair Spread
-                ax_spread.plot(spread_comparison.index, spread_comparison['PCA Fair'], 
-                              label=f'PCA Fair Spread ({pc_count} PCs)', marker='x', linestyle='--', linewidth=2.5, color='orange')
-                
-                # Plot Mispricing (Original - PCA Fair)
-                mispricing = spread_comparison['Original'] - spread_comparison['PCA Fair']
-                ax_spread.axhline(0, color='gray', linestyle='-', linewidth=0.5, alpha=0.7) # Add zero line for reference
-                
-                # Annotate the spread with the largest absolute mispricing
-                max_abs_mispricing = mispricing.abs().max()
-                if max_abs_mispricing > 0:
-                    mispricing_spread = mispricing.abs().idxmax()
-                    mispricing_value = mispricing.loc[mispricing_spread] * 10000 # Convert to BPS
+                if spread_comparison.empty:
+                    st.warning(f"No complete Spread data available for the selected analysis date {analysis_date.strftime('%Y-%m-%d')} after combining Original and PCA Fair values.")
+                else:
+                    # --- Plot the Spreads ---
+                    fig_spread, ax_spread = plt.subplots(figsize=(15, 7))
                     
-                    ax_spread.annotate(
-                        f"Mispricing: {mispricing_value:.2f} BPS",
-                        (mispricing_spread, spread_comparison.loc[mispricing_spread]['Original']),
-                        textcoords="offset points",
-                        xytext=(0, 10),
-                        ha='center',
-                        fontsize=10,
-                        bbox=dict(boxstyle="round,pad=0.5", fc="yellow", alpha=0.5)
+                    # Plot Original Spread
+                    ax_spread.plot(spread_comparison.index, spread_comparison['Original'], 
+                                label='Original Market Spread', marker='o', linestyle='-', linewidth=2.5, color='darkgreen')
+                    
+                    # Plot PCA Fair Spread
+                    ax_spread.plot(spread_comparison.index, spread_comparison['PCA Fair'], 
+                                label=f'PCA Fair Spread ({pc_count} PCs)', marker='x', linestyle='--', linewidth=2.5, color='orange')
+                    
+                    # Plot Mispricing (Original - PCA Fair)
+                    mispricing = spread_comparison['Original'] - spread_comparison['PCA Fair']
+                    ax_spread.axhline(0, color='gray', linestyle='-', linewidth=0.5, alpha=0.7) # Add zero line for reference
+                    
+                    # Annotate the spread with the largest absolute mispricing
+                    max_abs_mispricing = mispricing.abs().max()
+                    if max_abs_mispricing > 0:
+                        mispricing_spread = mispricing.abs().idxmax()
+                        mispricing_value = mispricing.loc[mispricing_spread] * 10000 # Convert to BPS
+                        
+                        ax_spread.annotate(
+                            f"Mispricing: {mispricing_value:.2f} BPS",
+                            (mispricing_spread, spread_comparison.loc[mispricing_spread]['Original']),
+                            textcoords="offset points",
+                            xytext=(0, 10),
+                            ha='center',
+                            fontsize=10,
+                            bbox=dict(boxstyle="round,pad=0.5", fc="yellow", alpha=0.5)
+                        )
+                    
+                    ax_spread.set_title('Market Spread vs. PCA Fair Spread', fontsize=16)
+                    ax_spread.set_xlabel('Spread Contract (Short-Long)')
+                    ax_spread.set_ylabel('Spread Value (Price Difference)')
+                    ax_spread.legend(loc='upper right')
+                    ax_spread.grid(True, linestyle=':', alpha=0.6)
+                    plt.xticks(rotation=45, ha='right')
+                    plt.tight_layout()
+                    st.pyplot(fig_spread)
+                    
+                    # --- Detailed Spread Table ---
+                    st.markdown("###### Spread Mispricing")
+                    detailed_comparison_spread = spread_comparison.copy()
+                    detailed_comparison_spread.index.name = 'Spread Contract'
+                    detailed_comparison_spread['Mispricing (BPS)'] = mispricing * 10000
+                    detailed_comparison_spread = detailed_comparison_spread.rename(
+                        columns={'Original': 'Original Spread', 'PCA Fair': 'PCA Fair Spread'}
                     )
-                
-                ax_spread.set_title('Market Spread vs. PCA Fair Spread', fontsize=16)
-                ax_spread.set_xlabel('Spread Contract (Short-Long)')
-                ax_spread.set_ylabel('Spread Value (Price Difference)')
-                ax_spread.legend(loc='upper right')
-                ax_spread.grid(True, linestyle=':', alpha=0.6)
-                plt.xticks(rotation=45, ha='right')
-                plt.tight_layout()
-                st.pyplot(fig_spread)
-                
-                # --- Detailed Spread Table ---
-                st.markdown("###### Spread Mispricing")
-                detailed_comparison_spread = spread_comparison.copy()
-                detailed_comparison_spread.index.name = 'Spread Contract'
-                detailed_comparison_spread['Mispricing (BPS)'] = mispricing * 10000
-                detailed_comparison_spread = detailed_comparison_spread.rename(
-                    columns={'Original': 'Original Spread', 'PCA Fair': 'PCA Fair Spread'}
-                )
-                
-                st.dataframe(
-                    detailed_comparison_spread.style.format({
-                        'Original Spread': "{:.4f}",
-                        'PCA Fair Spread': "{:.4f}",
-                        'Mispricing (BPS)': "{:.2f}"
-                    }),
-                    use_container_width=True
-                )
+                    
+                    st.dataframe(
+                        detailed_comparison_spread.style.format({
+                            'Original Spread': "{:.4f}",
+                            'PCA Fair Spread': "{:.4f}",
+                            'Mispricing (BPS)': "{:.2f}"
+                        }),
+                        use_container_width=True
+                    )
 
-        except KeyError:
-            st.error(f"The selected analysis date **{analysis_date.strftime('%Y-%m-%d')}** is not present in the filtered price data for Spreads. Please choose a different date within the historical range.")
+            except KeyError:
+                st.error(f"The selected analysis date **{analysis_date.strftime('%Y-%m-%d')}** is not present in the filtered price data for Spreads. Please choose a different date within the historical range.")
 
 
-        # --- 7.3 Butterfly (Fly) Snapshot ---
-        if not historical_butterflies_df.empty:
-            st.subheader("7.3 Outright Butterfly (Fly) Snapshot (e.g., Z20-2xH21+M21)")
+        # --- 7.3 Butterfly (Fly) Snapshot (Outright / 3-Month) ---
+        st.subheader("7.3 Outright Butterfly (Fly) Snapshot (e.g., Z20-2xH21+M21)")
+        historical_butterflies_df = historical_derivatives_map.get('Outright Butterflies')
 
+        if historical_butterflies_df.empty:
+            st.info("Not enough contracts (need 3 or more) to calculate or reconstruct the Outright Butterfly.")
+        else:
             try:
                 # 1. Select the single day's data, ensuring DataFrame structure
                 fly_snapshot_original = historical_butterflies_df.filter(regex='\(Original\)$').loc[[analysis_dt]].T
@@ -1062,9 +1068,6 @@ if not price_df_filtered.empty:
 
             except KeyError:
                 st.error(f"The selected analysis date **{analysis_date.strftime('%Y-%m-%d')}** is not present in the filtered price data for Butterflies. Please choose a different date within the historical range.")
-        else:
-            st.info("Not enough contracts (need 3 or more) to calculate and plot butterfly snapshot.")
-            
         
         # --- NEW: 7.4 Custom Spread and Butterfly Snapshots ---
         
@@ -1081,9 +1084,18 @@ if not price_df_filtered.empty:
             
             st.subheader(f"7.{starting_sub_section_num + i}. {derivative_type} Snapshot")
             
-            # FIX FOR AttributeError: Explicitly check for None or empty DataFrame BEFORE calling .filter()
             if historical_data is None or historical_data.empty:
-                st.warning(f"No derivative contracts could be constructed for {derivative_type} from the available curve. Skipping snapshot.")
+                # Check if the reason is lack of contracts
+                if derivative_type == '6-Month Spreads' and analysis_curve_df.shape[1] < 3:
+                     st.info(f"No derivative contracts could be constructed for {derivative_type} from the available curve. Need at least 3 contracts (e.g., Z5, H6, M6) for one 6-month spread (Z5-M6).")
+                elif derivative_type == '12-Month Spreads' and analysis_curve_df.shape[1] < 5:
+                     st.info(f"No derivative contracts could be constructed for {derivative_type} from the available curve. Need at least 5 contracts (e.g., Z5...Z6) for one 12-month spread (Z5-Z6).")
+                elif derivative_type == '6-Month Butterflies' and analysis_curve_df.shape[1] < 5:
+                     st.info(f"No derivative contracts could be constructed for {derivative_type} from the available curve. Need at least 5 contracts (e.g., Z5...U6) for one 6-month fly (Z5-2xM6+U6).")
+                elif derivative_type == '12-Month Butterflies' and analysis_curve_df.shape[1] < 9:
+                     st.info(f"No derivative contracts could be constructed for {derivative_type} from the available curve. Need at least 9 contracts (e.g., Z5...U7) for one 12-month fly (Z5-2xZ6+U7).")
+                else:
+                    st.warning(f"No derivative contracts could be reconstructed for {derivative_type} from the available curve. Skipping snapshot.")
                 continue
 
             try:
