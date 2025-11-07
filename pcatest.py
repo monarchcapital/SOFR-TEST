@@ -561,9 +561,14 @@ def find_optimal_factor_hedge(trade_label, factor_sensitivities_df, factor_name)
     # 1. Calculate absolute sensitivity and filter out the trade instrument
     # Use .abs() on the Series containing sensitivities to the specific factor
     abs_sensitivities = factor_sensitivities_df[factor_name].abs()
+    
+    # --- CRITICAL FIX: Ensure the trade is removed from candidates ---
     hedge_candidates_abs = abs_sensitivities.drop(trade_label, errors='ignore')
     
     if hedge_candidates_abs.empty:
+        # Check if the trade was the only one, or if drop failed silently
+        if trade_label in abs_sensitivities.index and len(abs_sensitivities) > 1:
+             return None, 0.0, f"Error: Failed to exclude trade '{trade_label}' from candidates. Check label consistency."
         return None, 0.0, "No other instruments available to use as a hedge."
 
     # 2. Find the instrument with the maximum absolute sensitivity
@@ -1154,6 +1159,7 @@ if not price_df_filtered.empty:
         
         # --- HEDGING DATA PREPARATION ---
         # 1. Combine all historical derivative time series into one DataFrame
+        # **CORRECTION: Ensure all derivatives have unique, explicit prefixes for Section 8 compatibility**
         all_derivatives_list = [
             spreads_3M_df.rename(columns=lambda x: f"3M Spread: {x}"),
             butterflies_3M_df.rename(columns=lambda x: f"3M Fly: {x}"),
@@ -1227,7 +1233,7 @@ if not price_df_filtered.empty:
         # --------------------------- 8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging - CORRECTED) ---------------------------
         st.header("8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging)")
         st.markdown(f"""
-            This section calculates the hedge ratio ($k_{{factor}}$) required to **completely neutralize** the exposure of a chosen trade to a specific **macro risk factor** (Level, Slope, or Curvature). The **optimal hedge instrument** is **automatically selected** based on having the **highest absolute sensitivity** to the chosen factor.
+            This section calculates the hedge ratio ($k_{{factor}}$) required to **completely neutralize** the exposure of a chosen trade to a specific **macro risk factor** (Level, Slope, or Curvature). The **optimal hedge instrument** is **automatically selected** based on having the **highest absolute sensitivity** to the chosen factor, which ensures the $k_{{factor}}$ ratio is minimized for maximum hedge efficiency.
             
             * **Factor View:** Hedge is used to remove sensitivity to the selected factor.
             * **Trade:** Long 1 unit of the selected instrument.
@@ -1246,9 +1252,10 @@ if not price_df_filtered.empty:
                  st.error("Factor sensitivity calculation failed.")
                  st.stop()
                  
-            # 2. Setup the selection boxes (Only need trade and factor selection now)
+            # 2. Setup the selection boxes 
             col_trade_sel, col_factor_sel = st.columns(2)
             
+            # The options list is now generated from the uniquely prefixed derivative names
             instrument_options = factor_sensitivities_df.index.tolist()
             factor_options = factor_sensitivities_df.columns.tolist()
 
@@ -1297,12 +1304,19 @@ if not price_df_filtered.empty:
                     hedge_sens = factor_sensitivities_df.loc[hedge_selection_factor, factor_selection]
                     
                     st.markdown(f"""
-                        The optimal hedge instrument is chosen as **{optimal_hedge_label}** because it has the **highest absolute sensitivity** to the **{factor_selection}** factor (**{abs(hedge_sens):.4f}**), making it the most efficient instrument to use for neutralization.
+                        The optimal hedge instrument is chosen as **{optimal_hedge_label}** because it has the **highest absolute sensitivity** to the **{factor_selection}** factor (**{abs(hedge_sens):.4f}**), making it the most efficient instrument for neutralization.
                         
                         * **Trade:** Long 1 unit of **{trade_selection_factor}** (Sensitivity: **{trade_sens:.4f}**)
                         * **Hedge Action:** Short **{k_factor:.4f}** units of the **Optimal Hedge Instrument** (**{optimal_hedge_label}**)
                     """)
                     
+                    # Display the sensitivities that led to the ratio
+                    col_trade_sens, col_hedge_sens = st.columns(2)
+                    with col_trade_sens:
+                        st.info(f"Trade Sensitivity to {factor_selection}: **{trade_sens:.4f}**")
+                    with col_hedge_sens:
+                        st.info(f"Hedge Sensitivity to {factor_selection}: **{hedge_sens:.4f}**")
+                        
                     st.markdown("---")
                     
                     # 4. Display Full Sensitivities Table
