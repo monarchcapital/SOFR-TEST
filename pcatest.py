@@ -249,9 +249,6 @@ def calculate_outright_loadings(derivatives_loadings, outright_contracts, deriva
     # 1. Initialize outright loadings
     outright_loadings = pd.DataFrame(0.0, index=outright_contracts, columns=derivatives_loadings.columns)
     
-    # Find the nearest contract column index in the derivatives loadings
-    nearest_contract_code = outright_contracts[0]
-    
     # 2. Filter for 3M spreads. 
     # Use the spread calculation function to get the expected names of 3M spreads (without the (3M) suffix)
     temp_3m_spreads = calculate_outright_spreads(derivatives_df.iloc[:, :len(outright_contracts)], gap_contracts=1)
@@ -262,14 +259,9 @@ def calculate_outright_loadings(derivatives_loadings, outright_contracts, deriva
         
     for pc_name in derivatives_loadings.columns:
         # Calculate the cumulative sum of the negative 3M spread loadings
-        # Load_Cn = Load_C(n-1) - Load_Spread(C(n-1)-Cn)
-        # Load_C2 = 0 - Load_Spread(C1-C2)
-        # Load_C3 = Load_C2 - Load_Spread(C2-C3) = -Load_Spread(C1-C2) - Load_Spread(C2-C3)
-        
         cumulative_loadings = -spread_loadings_3m[pc_name].cumsum()
         
         # Apply the cumulative sum to the outright loadings, starting from the second contract
-        # The index of outright_loadings starts at 0 (nearest_contract_code), the cumulative_loadings starts at C2's change
         outright_loadings.loc[outright_contracts[1:1+len(cumulative_loadings)], pc_name] = cumulative_loadings.values
 
     return outright_loadings
@@ -286,15 +278,15 @@ def transform_and_reconstruct(data_df, pca_model, data_mean, data_std, num_pcs):
     data_clean = data_scaled.dropna(how='all')
     
     # 2. Calculate PC Scores
-    # Note: We must use the full fitted components length here, not num_pcs
     n_fitted_components = pca_model.components_.shape[0]
     
     # --- FIX: Defensive check for empty data_clean before transformation ---
     if data_clean.empty:
         # If no clean data, return empty structures with correct columns/index
         st.warning("No complete rows of derivative data found for PCA scoring. Returning empty score/reconstruction DataFrames.")
-        empty_reconstructed = pd.DataFrame(index=data_df.index, columns=data_df.columns)
-        empty_scores = pd.DataFrame(index=data_df.index, columns=[f'PC{i+1}' for i in range(n_fitted_components)])
+        empty_index = data_df.index
+        empty_reconstructed = pd.DataFrame(np.nan, index=empty_index, columns=data_df.columns)
+        empty_scores = pd.DataFrame(np.nan, index=empty_index, columns=[f'PC{i+1}' for i in range(n_fitted_components)])
         return empty_reconstructed, empty_scores
     # ----------------------------------------------------------------------
     
@@ -321,9 +313,16 @@ def transform_and_reconstruct(data_df, pca_model, data_mean, data_std, num_pcs):
     )
     
     # Rescale back to original values: (Reconstructed_Scaled * Std) + Mean
-    reconstructed_df = (reconstructed_scaled * data_std_safe) + data_mean
+    # Need to reindex and fill NaNs because reconstruction is only for dates in data_clean
+    reconstructed_df = pd.DataFrame(np.nan, index=data_df.index, columns=data_df.columns)
+    reconstructed_df.loc[reconstructed_scaled.index, reconstructed_scaled.columns] = reconstructed_scaled
+    reconstructed_df = (reconstructed_df * data_std_safe) + data_mean
     
-    return reconstructed_df, scores
+    # Pad the scores DataFrame to match the original index for consistency
+    full_scores = pd.DataFrame(np.nan, index=data_df.index, columns=scores.columns)
+    full_scores.loc[scores.index, scores.columns] = scores
+
+    return reconstructed_df, full_scores
 
 def reconstruct_prices_and_derivatives(reconstructed_derivatives, outright_contracts, nearest_contract_price):
     """
@@ -359,7 +358,6 @@ def reconstruct_prices_and_derivatives(reconstructed_derivatives, outright_contr
             break
 
     # 2. Calculate the fair spreads/flies from the reconstructed prices
-    # Note: Using the reconstructed prices ensures the 6M and 12M spreads/flies are also "fair" based on the PCA curve
     reconstructed_prices = reconstructed_prices.dropna(axis=1, how='all')
 
     reconstructed_spreads_3m = calculate_outright_spreads(reconstructed_prices, gap_contracts=1)
@@ -522,10 +520,15 @@ if price_data is not None and expiry_data is not None:
             # --- 5. Factor Scores and Z-Scores ---
             st.header("5. Factor Scores Time Series and Z-Scores")
             
-            # Calculate Scores and Z-Scores (using max_pcs for time series for historical context)
-            reconstructed_df, scores = transform_and_reconstruct(
-                derivatives_df, pca, data_mean, data_std, n_components=max_pcs
+            # Calculate Scores time series (using max_pcs for historical context)
+            _, scores = transform_and_reconstruct(
+                derivatives_df, pca, data_mean, data_std, num_pcs=max_pcs
             )
+            
+            if scores.empty or scores.isnull().all().all():
+                 st.error("Cannot generate Factor Scores: No complete historical data rows found.")
+                 st.stop()
+                 
             selected_scores = scores.iloc[:, :n_components]
             z_scores = calculate_z_scores(selected_scores)
             
@@ -548,8 +551,8 @@ if price_data is not None and expiry_data is not None:
             )
             
             # Check for empty reconstruction before proceeding to snapshot analysis
-            if reconstructed_derivatives_selected.empty:
-                st.error("Cannot perform snapshot analysis: Reconstructed data is empty. Check data quality and time range.")
+            if reconstructed_derivatives_selected.empty or reconstructed_derivatives_selected.isnull().all().all():
+                st.error("Cannot perform snapshot analysis: Reconstructed derivative data is empty or all NaN. Check data quality and time range.")
                 st.stop()
             
             # Get the fair value curve (prices, spreads, flies)
