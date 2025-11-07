@@ -283,8 +283,8 @@ def transform_and_reconstruct(data_df, pca_model, data_mean, data_std, num_pcs):
     # --- FIX: Defensive check for empty data_clean before transformation ---
     if data_clean.empty:
         # If no clean data, return empty structures with correct columns/index
-        st.warning("No complete rows of derivative data found for PCA scoring. Returning empty score/reconstruction DataFrames.")
         empty_index = data_df.index
+        # Use np.nan to explicitly mark as missing/uncomputable
         empty_reconstructed = pd.DataFrame(np.nan, index=empty_index, columns=data_df.columns)
         empty_scores = pd.DataFrame(np.nan, index=empty_index, columns=[f'PC{i+1}' for i in range(n_fitted_components)])
         return empty_reconstructed, empty_scores
@@ -448,10 +448,12 @@ if price_data is not None and expiry_data is not None:
         butterflies_df = pd.concat([butterflies_3m_df, butterflies_6m_df, butterflies_12m_df], axis=1)
         
         # Combine all derivatives for PCA
-        derivatives_df = pd.concat([spreads_df, butterflies_df], axis=1).dropna(how='all')
+        derivatives_df = pd.concat([spreads_df, butterflies_df], axis=1)
         
+        # Find number of historically clean rows
+        derivatives_clean_rows = derivatives_df.dropna().shape[0]
         
-        if derivatives_df.shape[1] > 0 and derivatives_df.shape[0] > 100: # Check for minimum data
+        if derivatives_df.shape[1] > 0 and derivatives_clean_rows > 100: # Check for minimum data
             
             # --- 3. PCA Execution and Factor Selection ---
             st.header("3. PCA Execution and Factor Selection")
@@ -469,7 +471,7 @@ if price_data is not None and expiry_data is not None:
                     derivatives_df, n_components=max_pcs
                 )
             except ValueError as e:
-                st.error(f"PCA Error: {e}. This often means the input data has too few non-NaN rows or non-zero columns for the requested number of components.")
+                st.error(f"PCA Error: {e}. This often means the input data has too few non-NaN rows ({derivatives_clean_rows}) to fit {max_pcs} components. Try reducing the maximum number of contracts considered, or upload more historical data.")
                 st.stop()
                 
             
@@ -526,7 +528,7 @@ if price_data is not None and expiry_data is not None:
             )
             
             if scores.empty or scores.isnull().all().all():
-                 st.error("Cannot generate Factor Scores: No complete historical data rows found.")
+                 st.error("Cannot generate Factor Scores: No complete historical data rows found for the entire PCA fit period.")
                  st.stop()
                  
             selected_scores = scores.iloc[:, :n_components]
@@ -552,6 +554,21 @@ if price_data is not None and expiry_data is not None:
             
             # Check for empty reconstruction before proceeding to snapshot analysis
             if reconstructed_derivatives_selected.empty or reconstructed_derivatives_selected.isnull().all().all():
+                
+                # Check if the analysis date had valid raw derivative data
+                if analysis_date in derivatives_df.index:
+                    raw_snap = derivatives_df.loc[analysis_date]
+                    if raw_snap.isnull().sum() == raw_snap.shape[0]:
+                        st.error(f"Cannot perform snapshot analysis: The raw derivative data for the selected analysis date ({analysis_date.strftime('%Y-%m-%d')}) is **entirely NaN**. Please select an earlier date with complete data.")
+                        st.stop()
+                    else:
+                        st.error(
+                            "Cannot perform snapshot analysis: The reconstruction returned all NaN. This indicates that your **historical derivative data is too sparse**. "
+                            "PCA requires many rows where *all* derivative columns are non-NaN for accurate scoring. "
+                            "**Action:** Please ensure your uploaded price data has long, continuous history, or try selecting an earlier analysis date where the contracts were more liquid historically."
+                        )
+                        st.stop()
+                
                 st.error("Cannot perform snapshot analysis: Reconstructed derivative data is empty or all NaN. Check data quality and time range.")
                 st.stop()
             
@@ -717,4 +734,4 @@ if price_data is not None and expiry_data is not None:
                 st.info("Not enough contracts (need 3 or more) to calculate and plot butterfly snapshot.")
                 
         else:
-            st.error("PCA failed. Please check your data quantity and quality. Need at least 100 non-NaN rows to run PCA effectively.")
+            st.error(f"PCA failed. Please check your data quantity and quality. Need at least **100** non-NaN historical rows (found **{derivatives_clean_rows}**) to run PCA effectively. Please upload more complete historical data.")
