@@ -8,7 +8,7 @@ import seaborn as sns
 from datetime import datetime, date
 
 # --- Configuration ---
-st.set_page_config(layout="wide", page_title="SOFR Futures PCA Analyzer")
+st.set_page_page_config(layout="wide", page_title="SOFR Futures PCA Analyzer")
 
 # --- Helper Functions for Data Processing ---
 
@@ -827,6 +827,76 @@ def calculate_derivative_mispricings(historical_derivatives_list, analysis_dt):
     return pd.Series(mispricing_data, name='Hedge Mispricing (Rate %)') # MODIFIED: Column name update
 # --- END NEW HELPER FUNCTION ---
 
+
+# --- NEW FUNCTION FOR SECTION 8.3 ---
+def create_instrument_universe_table(factor_sensitivities_df, Sigma_Raw_df, mispricing_series):
+    """
+    Creates a comprehensive table of all derivative instruments with their key attributes:
+    Sensitivities, Total Volatility, and Mispricing.
+    """
+    if Sigma_Raw_df.empty or factor_sensitivities_df.empty:
+        return pd.DataFrame()
+
+    data = []
+    
+    # Calculate Total Volatility (Standard Deviation * 100)
+    # Total Volatility is sqrt(Variance) * 100
+    total_volatility = np.sqrt(np.diag(Sigma_Raw_df)) * 100
+    total_vol_series = pd.Series(total_volatility, index=Sigma_Raw_df.index)
+
+    for instrument in Sigma_Raw_df.index:
+        
+        # Determine Derivative Group (Spread, Fly, Double Fly)
+        if 'Spread' in instrument and 'Double' not in instrument:
+            instr_group = 'Spread'
+        elif 'Double Fly' in instrument:
+            instr_group = 'Double Fly'
+        elif 'Fly' in instrument:
+            instr_group = 'Fly'
+        else:
+            instr_group = 'Other'
+            
+        # Determine Maturity
+        if '3M' in instrument:
+            maturity = '3M'
+        elif '6M' in instrument:
+            maturity = '6M'
+        elif '12M' in instrument:
+            maturity = '12M'
+        else:
+            maturity = ''
+            
+        # Full Type
+        full_type = f"{maturity} {instr_group}" if maturity else instr_group
+        
+        # Sensitivities (Handle missing factors if pc_count < 3)
+        if instrument in factor_sensitivities_df.index:
+            sensitivities = factor_sensitivities_df.loc[instrument]
+            level_sens = sensitivities.get('Level (Whole Curve Shift)', np.nan)
+            slope_sens = sensitivities.get('Slope (Steepening/Flattening)', np.nan)
+            curve_sens = sensitivities.get('Curvature (Fly Risk)', np.nan)
+        else:
+            level_sens, slope_sens, curve_sens = np.nan, np.nan, np.nan
+        
+        # Mispricing (Rate %)
+        mispricing = mispricing_series.get(instrument, np.nan)
+
+        data.append({
+            'Instrument': instrument,
+            'Type': full_type,
+            'Derivative Group': instr_group, # Column for filtering
+            'Level Sensitivity': level_sens,
+            'Slope Sensitivity': slope_sens,
+            'Curvature Sensitivity': curve_sens,
+            'Total Volatility (Rate %)': total_vol_series.loc[instrument],
+            'Mispricing (Rate %)': mispricing
+        })
+
+    df = pd.DataFrame(data)
+    return df
+# --- END NEW FUNCTION ---
+
+
 # --- Streamlit Application Layout ---
 
 st.title("SOFR Futures PCA Analyzer")
@@ -1642,6 +1712,77 @@ if not price_df_filtered.empty:
             
             else:
                  st.info(f"No valid factor hedge candidates found for trade **{trade_selection_factor}** across Level, Slope, or Curvature.")
+
+
+            st.markdown("---") 
+
+            # --- 8.3 Filtered Universe of Potential Hedges ---
+            st.header("8.3 Filtered Universe of Potential Hedges")
+            st.markdown("""
+            This table provides a comprehensive view of all available derivative instruments, categorized by type (Spread, Fly, Double Fly). It presents the instrument's **risk attributes** (Sensitivities, Total Volatility) and its **trading signal** (Mispricing) to help identify high-quality hedging instruments.
+            
+            * **Note:** The hedging model is based on PCA of **Spreads/Derivatives**. Outright contracts are excluded here as they do not have the same standardized Level/Slope/Curvature factor exposures.
+            """)
+            
+            # 1. Create the universe table
+            instrument_universe_df = create_instrument_universe_table(factor_sensitivities_df, Sigma_Raw_df, mispricing_series)
+            
+            if not instrument_universe_df.empty:
+                
+                # 2. Add Filter
+                derivative_options = ['All Derivatives'] + sorted(instrument_universe_df['Derivative Group'].unique().tolist())
+                
+                # Exclude 'Other' if it's the only option or empty
+                if len(derivative_options) > 2 and 'Other' in derivative_options:
+                    derivative_options.remove('Other')
+                    
+                selected_group = st.radio(
+                    "Select Derivative Group to View:", 
+                    options=derivative_options,
+                    index=0,
+                    key='derivative_filter_83',
+                    horizontal=True
+                )
+                
+                # 3. Filter the table
+                if selected_group != 'All Derivatives':
+                    filtered_df = instrument_universe_df[instrument_universe_df['Derivative Group'] == selected_group]
+                else:
+                    filtered_df = instrument_universe_df.copy()
+                
+                # 4. Prepare for display and sort
+                display_df = filtered_df.drop(columns=['Derivative Group']).sort_values(
+                    by='Total Volatility (Rate %)', 
+                    ascending=False
+                )
+                
+                # 5. Display the table
+                st.markdown(f"###### Attributes for: **{selected_group}** (Total Instruments: {len(display_df)})")
+                st.dataframe(
+                    display_df.style.format({
+                        'Level Sensitivity': "{:.4f}",
+                        'Slope Sensitivity': "{:.4f}",
+                        'Curvature Sensitivity': "{:.4f}",
+                        'Total Volatility (Rate %)': "{:.4f}",
+                        'Mispricing (Rate %)': "{:.4f}"
+                    }).background_gradient(
+                        subset=['Mispricing (Rate %)'], 
+                        cmap='coolwarm', 
+                        vmax=display_df['Mispricing (Rate %)'].abs().max() * 0.5 if not display_df['Mispricing (Rate %)'].abs().empty else 0.5,
+                        vmin=-display_df['Mispricing (Rate %)'].abs().max() * 0.5 if not display_df['Mispricing (Rate %)'].abs().empty else -0.5 # Gradient strength
+                    ),
+                    use_container_width=True
+                )
+                
+                st.markdown("""
+                ### 🎯 How to use this table for hedging:
+                * **Identify Mispriced Hedges (Signal):** Look for instruments with a high absolute **Mispricing (Rate %)** (deep red or deep blue in the background gradient). This is your potential *alpha* source.
+                * **Assess Factor Exposure (Risk Match):** Check the **Level, Slope, and Curvature Sensitivity**. If your main trade is exposed to the Slope factor, you'll need a hedge with a strong, opposite Slope Sensitivity.
+                * **Evaluate Hedge Impact (Risk):** The **Total Volatility (Rate %)** is the inherent risk of the hedge instrument itself. Using a high volatility hedge (top of the list) will require a more precise hedge ratio to avoid adding more risk than you remove.
+                """)
+
+            else:
+                st.info("Instrument universe table could not be created. Ensure enough historical data is available.")
 
              
             # Display full sensitivities table as before for reference
