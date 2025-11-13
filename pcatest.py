@@ -468,13 +468,14 @@ def calculate_best_and_worst_hedge_3M(trade_label, loadings_df, eigenvalues, pc_
         Residual_Variance = Var_Trade - (k_star * Cov_TH)
         Residual_Variance = max(0, Residual_Variance) 
         
-        # 3. Residual Volatility (Score) in BPS
-        Residual_Volatility_BPS = np.sqrt(Residual_Variance) * 10000
+        # 3. Residual Volatility (Score) in Rate % (was BPS, now divided by 100)
+        # 1 point = 100 BPS = 1% Rate
+        Residual_Volatility_Rate_Pct = np.sqrt(Residual_Variance) * 100 # MODIFIED: * 10000 -> * 100
         
         results.append({
             'Hedge Spread': hedge_spread,
             'Hedge Ratio (k*)': k_star,
-            'Residual Volatility (BPS)': Residual_Volatility_BPS
+            'Residual Volatility (Rate %)': Residual_Volatility_Rate_Pct # MODIFIED: Column name update
         })
 
     if not results:
@@ -483,10 +484,10 @@ def calculate_best_and_worst_hedge_3M(trade_label, loadings_df, eigenvalues, pc_
     results_df = pd.DataFrame(results)
     
     # Best hedge minimizes Residual Volatility
-    best_hedge = results_df.sort_values(by='Residual Volatility (BPS)', ascending=True).iloc[0]
+    best_hedge = results_df.sort_values(by='Residual Volatility (Rate %)', ascending=True).iloc[0]
     
     # Worst hedge maximizes Residual Volatility
-    worst_hedge = results_df.sort_values(by='Residual Volatility (BPS)', ascending=False).iloc[0]
+    worst_hedge = results_df.sort_values(by='Residual Volatility (Rate %)', ascending=False).iloc[0]
     
     # Return the individual best/worst series AND the full DataFrame
     return best_hedge, worst_hedge, results_df
@@ -579,13 +580,14 @@ def calculate_best_and_worst_hedge_generalized(trade_label, Sigma_Raw_df):
         Residual_Variance = Var_Trade - (k_star * Cov_TH)
         Residual_Variance = max(0, Residual_Variance) 
         
-        # 3. Residual Volatility (Score) in BPS
-        Residual_Volatility_BPS = np.sqrt(Residual_Variance) * 10000
+        # 3. Residual Volatility (Score) in Rate % (was BPS, now divided by 100)
+        # 1 point = 100 BPS = 1% Rate
+        Residual_Volatility_Rate_Pct = np.sqrt(Residual_Variance) * 100 # MODIFIED: * 10000 -> * 100
         
         results.append({
             'Hedge Instrument': hedge_instrument,
             'Hedge Ratio (k*)': k_star,
-            'Residual Volatility (BPS)': Residual_Volatility_BPS
+            'Residual Volatility (Rate %)': Residual_Volatility_Rate_Pct # MODIFIED: Column name update
         })
 
     if not results:
@@ -594,10 +596,10 @@ def calculate_best_and_worst_hedge_generalized(trade_label, Sigma_Raw_df):
     results_df = pd.DataFrame(results)
     
     # Best hedge minimizes Residual Volatility
-    best_hedge = results_df.sort_values(by='Residual Volatility (BPS)', ascending=True).iloc[0]
+    best_hedge = results_df.sort_values(by='Residual Volatility (Rate %)', ascending=True).iloc[0]
     
     # Worst hedge maximizes Residual Volatility
-    worst_hedge = results_df.sort_values(by='Residual Volatility (BPS)', ascending=False).iloc[0]
+    worst_hedge = results_df.sort_values(by='Residual Volatility (Rate %)', ascending=False).iloc[0]
     
     # Return the individual best/worst series AND the full DataFrame
     return best_hedge, worst_hedge, results_df
@@ -659,7 +661,7 @@ def calculate_all_factor_hedges(trade_label, factor_name, factor_sensitivities_d
             # 1. Calculate Factor Hedge Ratio (k_factor)
             if abs(Hedge_Exposure) < 1e-9:
                 k_factor = 0.0
-                Residual_Volatility_BPS = np.nan # Cannot neutralize factor with zero-exposure hedge
+                Residual_Volatility_Rate_Pct = np.nan # Cannot neutralize factor with zero-exposure hedge
             else:
                 # k_factor is the ratio of sensitivities: k = Beta_T / Beta_H
                 k_factor = Trade_Exposure / Hedge_Exposure
@@ -669,15 +671,16 @@ def calculate_all_factor_hedges(trade_label, factor_name, factor_sensitivities_d
                 Residual_Variance = Var_Trade + (k_factor**2 * Var_Hedge) - (2 * k_factor * Cov_TH)
                 Residual_Variance = max(0, Residual_Variance) 
                 
-                # 3. Residual Volatility (Score) in BPS
-                Residual_Volatility_BPS = np.sqrt(Residual_Variance) * 10000
+                # 3. Residual Volatility (Score) in Rate % (was BPS, now divided by 100)
+                # 1 point = 100 BPS = 1% Rate
+                Residual_Volatility_Rate_Pct = np.sqrt(Residual_Variance) * 100 # MODIFIED: * 10000 -> * 100
                 
             results.append({
                 'Hedge Instrument': hedge_instrument,
                 'Trade Sensitivity': Trade_Exposure,
                 'Hedge Sensitivity': Hedge_Exposure,
                 f'Factor Hedge Ratio (k_factor)': k_factor,
-                'Residual Volatility (BPS)': Residual_Volatility_BPS
+                'Residual Volatility (Rate %)': Residual_Volatility_Rate_Pct # MODIFIED: Column name update
             })
             
         except Exception as e:
@@ -688,16 +691,16 @@ def calculate_all_factor_hedges(trade_label, factor_name, factor_sensitivities_d
         
     results_df = pd.DataFrame(results)
     
-    # Sort by Residual Volatility (BPS) to show the most effective hedges first
-    results_df = results_df.sort_values(by='Residual Volatility (BPS)', ascending=True, na_position='last')
+    # Sort by Residual Volatility (Rate %) to show the most effective hedges first
+    results_df = results_df.sort_values(by='Residual Volatility (Rate %)', ascending=True, na_position='last')
     
     return results_df, None
 
 # --- NEW HELPER FUNCTION for Mispricing ---
 def calculate_derivative_mispricings(historical_derivatives_list, analysis_dt):
     """
-    Calculates the mispricing (Original - PCA Fair) in BPS for all derivatives 
-    on the analysis date.
+    Calculates the mispricing (Original - PCA Fair) in Rate % for all derivatives 
+    on the analysis date. (Was BPS, now divided by 100)
     
     Args:
         historical_derivatives_list (list[pd.DataFrame]): List of all historical derivative DFs 
@@ -705,7 +708,7 @@ def calculate_derivative_mispricings(historical_derivatives_list, analysis_dt):
         analysis_dt (datetime.datetime): The single analysis date for the snapshot.
 
     Returns:
-        pd.Series: Series indexed by derivative label (without suffix), with mispricing in BPS as values.
+        pd.Series: Series indexed by derivative label (without suffix), with mispricing in Rate % as values.
     """
     mispricing_data = {}
     
@@ -730,11 +733,12 @@ def calculate_derivative_mispricings(historical_derivatives_list, analysis_dt):
                 # Remove the suffix to get the clean derivative label (e.g., '3M Spread: Z25-H26')
                 derivative_label = original_col.replace(' (Original)', '')
                 
-                # Calculate mispricing in BPS: (Original - PCA Fair) * 10000
-                mispricing = (row[original_col] - row[pca_col]) * 10000
+                # Calculate mispricing in Rate %: (Original - PCA Fair) * 100 
+                # MODIFIED: * 10000 -> * 100
+                mispricing = (row[original_col] - row[pca_col]) * 100
                 mispricing_data[derivative_label] = mispricing
                 
-    return pd.Series(mispricing_data, name='Hedge Mispricing (BPS)')
+    return pd.Series(mispricing_data, name='Hedge Mispricing (Rate %)') # MODIFIED: Column name update
 # --- END NEW HELPER FUNCTION ---
 
 # --- Streamlit Application Layout ---
@@ -1060,10 +1064,11 @@ if not price_df_filtered.empty:
                 max_abs_mispricing = mispricing.abs().max()
                 if max_abs_mispricing > 0:
                     mispricing_contract = mispricing.abs().idxmax()
-                    mispricing_value = mispricing.loc[mispricing_contract] * 10000 # Convert to BPS
+                    # MODIFIED: * 10000 -> * 100
+                    mispricing_value = mispricing.loc[mispricing_contract] * 100 
                     
                     ax.annotate(
-                        f"Mispricing: {mispricing_value:.2f} BPS", 
+                        f"Mispricing: {mispricing_value:.4f} Rate %", # MODIFIED: Unit update
                         (mispricing_contract, comparison.loc[mispricing_contract]['Original']), 
                         textcoords="offset points", 
                         xytext=(0, 10), 
@@ -1086,7 +1091,8 @@ if not price_df_filtered.empty:
                 st.markdown(f"###### {derivative_type} Mispricing")
                 detailed_comparison = comparison.copy()
                 detailed_comparison.index.name = f'{derivative_type} Contract'
-                detailed_comparison['Mispricing (BPS)'] = mispricing * 10000
+                # MODIFIED: Column name and scaling updated
+                detailed_comparison['Mispricing (Rate %)'] = mispricing * 100 
                 detailed_comparison = detailed_comparison.rename(
                     columns={'Original': f'Original {derivative_type}', 'PCA Fair': f'PCA Fair {derivative_type}'}
                 )
@@ -1095,7 +1101,7 @@ if not price_df_filtered.empty:
                     detailed_comparison.style.format({
                         f'Original {derivative_type}': "{:.4f}",
                         f'PCA Fair {derivative_type}': "{:.4f}",
-                        'Mispricing (BPS)': "{:.2f}"
+                        'Mispricing (Rate %)': "{:.4f}" # MODIFIED: Formatting to 4 decimals for clarity
                     }), 
                     use_container_width=True
                 )
@@ -1139,13 +1145,14 @@ if not price_df_filtered.empty:
             detailed_comparison.index.name = 'Contract'
             detailed_comparison['Original Rate (%)'] = 100.0 - detailed_comparison['Original']
             detailed_comparison['PCA Fair Rate (%)'] = 100.0 - detailed_comparison['PCA Fair']
-            detailed_comparison['Mispricing (BPS)'] = (detailed_comparison['Original'] - detailed_comparison['PCA Fair']) * 10000
+            # MODIFIED: Column name and scaling updated
+            detailed_comparison['Mispricing (Rate %)'] = (detailed_comparison['Original'] - detailed_comparison['PCA Fair']) * 100
             
             detailed_comparison = detailed_comparison.rename(
                 columns={'Original': 'Original Price', 'PCA Fair': 'PCA Fair Price'}
             )
             detailed_comparison = detailed_comparison[[
-                'Original Price', 'Original Rate (%)', 'PCA Fair Price', 'PCA Fair Rate (%)', 'Mispricing (BPS)'
+                'Original Price', 'Original Rate (%)', 'PCA Fair Price', 'PCA Fair Rate (%)', 'Mispricing (Rate %)' # MODIFIED: Column name update
             ]]
             
             st.dataframe(
@@ -1154,7 +1161,7 @@ if not price_df_filtered.empty:
                     'PCA Fair Price': "{:.4f}",
                     'Original Rate (%)': "{:.4f}",
                     'PCA Fair Rate (%)': "{:.4f}",
-                    'Mispricing (BPS)': "{:.2f}"
+                    'Mispricing (Rate %)': "{:.4f}" # MODIFIED: Formatting to 4 decimals for clarity
                 }), 
                 use_container_width=True
             )
@@ -1226,7 +1233,8 @@ if not price_df_filtered.empty:
         This section calculates the **Minimum Variance Hedge Ratio ($k^*$ )** for a chosen **3M spread** trade, using *another 3M spread* as the hedge. The calculation uses the **Covariance Matrix** of the **3M spreads**, which is **reconstructed using the selected {pc_count} Principal Components**.
         * **Trade:** Long 1 unit of the selected 3M spread.
         * **Hedge:** Short $k^*$ units of the hedging 3M spread.
-        """)
+        * **Volatility:** Expressed as **Rate %** (was BPS, now divided by 100).
+        """) # MODIFIED: Note on Rate % update
         
         if spreads_3M_df_clean.shape[1] < 2:
             st.warning("Not enough 3M spreads available to calculate a hedge.")
@@ -1252,7 +1260,7 @@ if not price_df_filtered.empty:
                 st.markdown(f"""
                 - **Hedge Instrument (H):** **{best_hedge_data_3m['Hedge Spread']}**
                 - **Hedge Action:** Short **{best_hedge_data_3m['Hedge Ratio (k*)']:.4f}** units.
-                - **Residual Volatility (Score):** **{best_hedge_data_3m['Residual Volatility (BPS)']:.2f} BPS** (Lowest Risk)
+                - **Residual Volatility (Rate %):** **{best_hedge_data_3m['Residual Volatility (Rate %)']:.4f} Rate %** (Lowest Risk) # MODIFIED: Name and format update
                 """)
                 
                 # --- Worst Hedge ---
@@ -1260,18 +1268,18 @@ if not price_df_filtered.empty:
                 st.markdown(f"""
                 - **Hedge Instrument (H):** **{worst_hedge_data_3m['Hedge Spread']}**
                 - **Hedge Action:** Short **{worst_hedge_data_3m['Hedge Ratio (k*)']:.4f}** units.
-                - **Residual Volatility (Score):** **{worst_hedge_data_3m['Residual Volatility (BPS)']:.2f} BPS** (Highest Risk)
+                - **Residual Volatility (Rate %):** **{worst_hedge_data_3m['Residual Volatility (Rate %)']:.4f} Rate %** (Highest Risk) # MODIFIED: Name and format update
                 """)
                 
                 st.markdown("---")
                 st.markdown("###### Detailed Hedging Results (All 3M Spreads as Hedge Candidates - Sorted by Minimum Variance)")
                 # Use the full results DataFrame directly and sort it for display
-                all_results_df_full_3m = all_results_df_full_3m.sort_values(by='Residual Volatility (BPS)', ascending=True)
+                all_results_df_full_3m = all_results_df_full_3m.sort_values(by='Residual Volatility (Rate %)', ascending=True) # MODIFIED: Sort column update
                 
                 st.dataframe(
                     all_results_df_full_3m.style.format({
                         'Hedge Ratio (k*)': "{:.4f}",
-                        'Residual Volatility (BPS)': "{:.2f}"
+                        'Residual Volatility (Rate %)': "{:.4f}" # MODIFIED: Name and format update
                     }), 
                     use_container_width=True
                 )
@@ -1285,7 +1293,8 @@ if not price_df_filtered.empty:
         This section calculates the **Minimum Variance Hedge Ratio ($k^*$ )** for *any* derivative trade, using *any* other derivative as a hedge. The calculation is based on the **full covariance matrix** of all derivatives, which is **reconstructed using the selected {pc_count} Principal Components** derived from the 3M Spreads.
         * **Trade:** Long 1 unit of the selected instrument.
         * **Hedge:** Short $k^*$ units of the hedging instrument.
-        """)
+        * **Volatility:** Expressed as **Rate %** (was BPS, now divided by 100).
+        """) # MODIFIED: Note on Rate % update
 
         # --- HEDGING DATA PREPARATION (FOR SECTIONS 7 & 8) ---
         
@@ -1338,7 +1347,7 @@ if not price_df_filtered.empty:
                 st.markdown(f"""
                 - **Hedge Instrument (H):** **{best_hedge_data_gen['Hedge Instrument']}**
                 - **Hedge Action:** Short **{best_hedge_data_gen['Hedge Ratio (k*)']:.4f}** units.
-                - **Residual Volatility (Score):** **{best_hedge_data_gen['Residual Volatility (BPS)']:.2f} BPS** (Lowest Risk)
+                - **Residual Volatility (Rate %):** **{best_hedge_data_gen['Residual Volatility (Rate %)']:.4f} Rate %** (Lowest Risk) # MODIFIED: Name and format update
                 """)
                 
                 # --- Worst Hedge ---
@@ -1346,18 +1355,18 @@ if not price_df_filtered.empty:
                 st.markdown(f"""
                 - **Hedge Instrument (H):** **{worst_hedge_data_gen['Hedge Instrument']}**
                 - **Hedge Action:** Short **{worst_hedge_data_gen['Hedge Ratio (k*)']:.4f}** units.
-                - **Residual Volatility (Score):** **{worst_hedge_data_gen['Residual Volatility (BPS)']:.2f} BPS** (Highest Risk)
+                - **Residual Volatility (Rate %):** **{worst_hedge_data_gen['Residual Volatility (Rate %)']:.4f} Rate %** (Highest Risk) # MODIFIED: Name and format update
                 """)
                 
                 st.markdown("---")
                 st.markdown("###### Detailed Hedging Results (All Derivatives as Hedge Candidates - Sorted by Minimum Variance)")
                 # Use the full results DataFrame directly and sort it for display
-                all_results_df_full_gen = all_results_df_full_gen.sort_values(by='Residual Volatility (BPS)', ascending=True)
+                all_results_df_full_gen = all_results_df_full_gen.sort_values(by='Residual Volatility (Rate %)', ascending=True) # MODIFIED: Sort column update
                 
                 st.dataframe(
                     all_results_df_full_gen.style.format({
                         'Hedge Ratio (k*)': "{:.4f}",
-                        'Residual Volatility (BPS)': "{:.2f}"
+                        'Residual Volatility (Rate %)': "{:.4f}" # MODIFIED: Name and format update
                     }), 
                     use_container_width=True
                 )
@@ -1368,11 +1377,12 @@ if not price_df_filtered.empty:
         # --------------------------- 8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging - MODIFIED) ---------------------------
         st.header("8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging)")
         st.markdown(f"""
-        This strategy selects a hedge instrument to neutralize a trade's exposure to a **single, specific risk factor** (Level, Slope, or Curvature). The **Hedge Ratio ($k_{{factor}}$)** is determined purely by the ratio of sensitivities (factor exposures) of the trade and the hedge. The table below shows the calculated hedge ratio and the **Residual Volatility (BPS)** *after* applying that factor hedge, calculated using the full $\Sigma_{{\text{{Raw}}}}$ covariance matrix.
+        This strategy selects a hedge instrument to neutralize a trade's exposure to a **single, specific risk factor** (Level, Slope, or Curvature). The **Hedge Ratio ($k_{{factor}}$)** is determined purely by the ratio of sensitivities (factor exposures) of the trade and the hedge. The table below shows the calculated hedge ratio and the **Residual Volatility (Rate %)** *after* applying that factor hedge, calculated using the full $\Sigma_{{\text{{Raw}}}}$ covariance matrix.
         * **Goal:** Neutralize exposure to the selected factor.
         * **Formula:** $k_{{\text{{factor}}}} = \\frac{{\\text{{Sens}}(\\text{{Trade}}, \\text{{Factor}})}}{{\\text{{Sens}}(\\text{{Hedge}}, \\text{{Factor}})}}$
-        * **Sorting:** Results are sorted by **Residual Volatility (BPS)** *after* hedging. The best factor hedge is the one with the lowest residual risk.
-        """)
+        * **Sorting:** Results are sorted by **Residual Volatility (Rate %)** *after* hedging. The best factor hedge is the one with the lowest residual risk.
+        * **Mispricing/Volatility:** Expressed as **Rate %** (was BPS, now divided by 100).
+        """) # MODIFIED: Note on Rate % update
         
         # 1. Calculate Factor Sensitivities (L_D columns renamed)
         factor_sensitivities_df = calculate_factor_sensitivities(loadings_df_gen, pc_count)
@@ -1410,7 +1420,7 @@ if not price_df_filtered.empty:
                     continue
                 
                 # Filter out hedges with near-zero factor sensitivity (Ratio is meaningless/too large)
-                factor_results_df_clean = factor_results_df.dropna(subset=['Residual Volatility (BPS)'])
+                factor_results_df_clean = factor_results_df.dropna(subset=['Residual Volatility (Rate %)']) # MODIFIED: Column name update
                 
                 if not factor_results_df_clean.empty:
                     # Find the SINGLE best hedge (minimum residual volatility) for the current factor
@@ -1438,13 +1448,13 @@ if not price_df_filtered.empty:
                         'Hedge Sensitivity': best_hedge_row['Hedge Sensitivity'],
                         'Hedge Ratio (|k|)': abs(k_factor_value),
                         'Hedge Action': hedge_action,
-                        'Residual Volatility (BPS)': best_hedge_row['Residual Volatility (BPS)'],
-                        'Hedge Mispricing (BPS)': hedge_mispricing # <-- NEW KEY ADDED
+                        'Residual Volatility (Rate %)': best_hedge_row['Residual Volatility (Rate %)'], # MODIFIED: Column name update
+                        'Hedge Mispricing (Rate %)': hedge_mispricing # MODIFIED: Column name update
                     })
 
             # --- Display Summary Table of Best Factor Hedges ---
             if summary_results:
-                summary_df = pd.DataFrame(summary_results).sort_values(by='Residual Volatility (BPS)', ascending=True)
+                summary_df = pd.DataFrame(summary_results).sort_values(by='Residual Volatility (Rate %)', ascending=True) # MODIFIED: Sort column update
                 
                 # MODIFICATION: Insert 'Hedge Mispricing (BPS)' into the displayed columns
                 st.dataframe(
@@ -1453,16 +1463,16 @@ if not price_df_filtered.empty:
                         'Hedge Instrument', 
                         'Hedge Action', 
                         'Hedge Ratio (|k|)', 
-                        'Residual Volatility (BPS)',
-                        'Hedge Mispricing (BPS)', # <-- NEW COLUMN
+                        'Residual Volatility (Rate %)', # MODIFIED: Column name update
+                        'Hedge Mispricing (Rate %)', # MODIFIED: Column name update
                         'Trade Sensitivity', 
                         'Hedge Sensitivity'
                     ]].style.format({
                         'Trade Sensitivity': "{:.4f}",
                         'Hedge Sensitivity': "{:.4f}",
                         'Hedge Ratio (|k|)': "{:.4f}",
-                        'Residual Volatility (BPS)': "{:.2f}",
-                        'Hedge Mispricing (BPS)': "{:.2f}", # <-- NEW FORMATTING
+                        'Residual Volatility (Rate %)': "{:.4f}", # MODIFIED: Format to 4 decimals for clarity
+                        'Hedge Mispricing (Rate %)': "{:.4f}", # MODIFIED: Format to 4 decimals for clarity
                     }),
                     use_container_width=True
                 )
