@@ -637,12 +637,10 @@ def calculate_all_factor_hedges(trade_label, factor_name, factor_sensitivities_d
     Calculates the Factor Hedge Ratio and the resulting Residual Volatility for all potential 
     hedge instruments, for a specified factor.
     """
-    # Check if the factor name in factor_sensitivities_df is present in the trade_label row
-    if factor_name not in factor_sensitivities_df.columns:
-        return pd.DataFrame(), f"Factor '{factor_name}' not found."
-        
     if trade_label not in factor_sensitivities_df.index:
         return pd.DataFrame(), f"Trade instrument '{trade_label}' not found in sensitivities."
+    if factor_name not in factor_sensitivities_df.columns:
+        return pd.DataFrame(), f"Factor '{factor_name}' not found."
     if trade_label not in Sigma_Raw_df.index:
         return pd.DataFrame(), f"Trade instrument '{trade_label}' not found in covariance matrix."
 
@@ -663,8 +661,7 @@ def calculate_all_factor_hedges(trade_label, factor_name, factor_sensitivities_d
             # 1. Calculate Factor Hedge Ratio (k_factor)
             if abs(Hedge_Exposure) < 1e-9:
                 k_factor = 0.0
-                # Assign NaN to volatility if factor cannot be neutralized
-                Residual_Volatility_BPS = np.nan 
+                Residual_Volatility_BPS = np.nan # Cannot neutralize factor with zero-exposure hedge
             else:
                 # k_factor is the ratio of sensitivities: k = Beta_T / Beta_H
                 k_factor = Trade_Exposure / Hedge_Exposure
@@ -697,37 +694,6 @@ def calculate_all_factor_hedges(trade_label, factor_name, factor_sensitivities_d
     results_df = results_df.sort_values(by='Residual Volatility (BPS)', ascending=True, na_position='last')
     
     return results_df, None
-    
-    
-# --- NEW HELPER FUNCTION FOR MISPRICING EXTRACTION ---
-def _extract_mispricing_snapshot(historical_df, analysis_dt):
-    """
-    Extracts mispricing (Original - PCA Fair) in BPS for a single derivative type snapshot 
-    at a specific date. Index is the full derivative label (e.g., '3M Spread: Z25-H26').
-    """
-    if historical_df.empty:
-        return pd.DataFrame()
-    try:
-        # Select the single day's data
-        snapshot_original = historical_df.filter(regex='\(Original\)$').loc[analysis_dt].T
-        snapshot_pca = historical_df.filter(regex='\(PCA\)$').loc[analysis_dt].T
-        
-        # Rename indices to the unified derivative label (e.g., '3M Spread: Z25-H26')
-        snapshot_original.index = snapshot_original.index.str.replace(r'\s\(Original\)$', '', regex=True)
-        snapshot_pca.index = snapshot_pca.index.str.replace(r'\s\(PCA\)$', '', regex=True)
-        
-        # Concatenate and calculate mispricing
-        comparison = pd.concat([snapshot_original, snapshot_pca], axis=1)
-        comparison.columns = ['Original', 'PCA Fair']
-
-        # Mispricing (Original - PCA Fair) in BPS
-        mispricing = (comparison['Original'] - comparison['PCA Fair']).dropna() * 10000
-        mispricing.name = 'Residual (BPS)'
-        
-        return mispricing.to_frame()
-    except KeyError:
-        return pd.DataFrame() # Date not in index
-# --- END NEW HELPER FUNCTION ---
 
 
 # --- Streamlit Application Layout ---
@@ -755,7 +721,6 @@ expiry_df = load_data(expiry_file)
 loadings_df_gen = pd.DataFrame()
 Sigma_Raw_df = pd.DataFrame()
 spreads_3M_df_no_prefix = pd.DataFrame() # Also need this for Section 6 if price_df is not None
-mispricing_df = pd.DataFrame() # Placeholder for the new combined mispricing DF
 
 if price_df is not None and expiry_df is not None:
     # --- Date Range Filter ---
@@ -997,33 +962,6 @@ if not price_df_filtered.empty:
         historical_outrights_df, historical_spreads_3M_df, historical_butterflies_3M_df, historical_spreads_6M_df, historical_butterflies_6M_df, historical_spreads_12M_df, historical_butterflies_12M_df, historical_double_butterflies_3M_df, historical_double_butterflies_6M_df, historical_double_butterflies_12M_df, spreads_3M_df_no_prefix = \
             reconstruct_prices_and_derivatives(analysis_curve_df, reconstructed_spreads_3M, spreads_3M_df_raw, spreads_6M_df, butterflies_3M_df, butterflies_6M_df, spreads_12M_df, butterflies_12M_df, double_butterflies_3M_df, double_butterflies_6M_df, double_butterflies_12M_df)
 
-
-        # --- COMPREHENSIVE MISPRICING DATA FRAME FOR SECTION 8 ---
-        mispricing_data_list = []
-
-        all_hist_dfs = {
-            '3M Spread': historical_spreads_3M_df,
-            '3M Fly': historical_butterflies_3M_df,
-            '3M Double Fly': historical_double_butterflies_3M_df,
-            '6M Spread': historical_spreads_6M_df,
-            '6M Fly': historical_butterflies_6M_df,
-            '6M Double Fly': historical_double_butterflies_6M_df,
-            '12M Spread': historical_spreads_12M_df,
-            '12M Fly': historical_butterflies_12M_df,
-            '12M Double Fly': historical_double_butterflies_12M_df
-        }
-
-        for prefix, hist_df in all_hist_dfs.items():
-            mispricing_series = _extract_mispricing_snapshot(hist_df, analysis_dt)
-            if not mispricing_series.empty:
-                # Index names are already prefixed (e.g., '3M Spread: Z25-H26')
-                mispricing_data_list.append(mispricing_series)
-
-        if mispricing_data_list:
-            mispricing_df = pd.concat(mispricing_data_list)
-        else:
-            mispricing_df = pd.DataFrame()
-        # -------------------------------------------------------------
         
         # --- HELPER FUNCTION FOR PLOTTING SNAPSHOTS (defined here to use local variables) ---
         def plot_snapshot(historical_df, derivative_type, analysis_dt, pc_count):
@@ -1418,7 +1356,7 @@ if not price_df_filtered.empty:
                 st.warning("Generalized Minimum Variance Hedging calculation failed for the selected trade. Check if enough historical data is available after filtering.")
 
 
-        # --------------------------- 8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging - REWRITTEN) ---------------------------
+        # --------------------------- 8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging - MODIFIED) ---------------------------
         st.header("8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging)")
         st.markdown(f"""
             This strategy selects a hedge instrument to neutralize a trade's exposure to a **single, specific risk factor** (Level, Slope, or Curvature). The **Hedge Ratio ($k_{{factor}}$)** is determined purely by the ratio of sensitivities (factor exposures) of the trade and the hedge. The table below shows the calculated hedge ratio and the **Residual Volatility (BPS)** *after* applying that factor hedge, calculated using the full $\\Sigma_{{\\text{{Raw}}}}$ covariance matrix.
@@ -1435,181 +1373,107 @@ if not price_df_filtered.empty:
              st.error("Factor sensitivity data is unavailable. Please ensure Section 7 successfully calculated the loadings.")
         else:
             
-            # 2. Setup the selection boxes 
-            col_trade_sel, col_factor_sel = st.columns(2)
+            # --- START MODIFICATION FOR AUTOMATIC MULTI-FACTOR CALCULATION ---
             
+            # 2. Setup the single trade selection box 
             instrument_options = factor_sensitivities_df.index.tolist()
-            factor_options = factor_sensitivities_df.columns.tolist()
-
-            with col_trade_sel:
-                trade_selection_factor = st.selectbox(
-                    "1. Select Trade Instrument (Long 1 unit):", 
-                    options=instrument_options,
-                    index=0,
-                    key='trade_instrument_factor_table' 
-                )
-            with col_factor_sel:
-                factor_selection = st.selectbox(
-                    "2. Select Factor to Neutralize:", 
-                    options=factor_options,
-                    index=0,
-                    key='factor_select_table' 
-                )
+            factor_options = factor_sensitivities_df.columns.tolist() # This contains ['Level', 'Slope', 'Curvature']
+            
+            if not factor_options:
+                st.error("No principal components (Level, Slope, Curvature) were calculated.")
+                st.stop()
+                
+            trade_selection_factor = st.selectbox(
+                "Select Trade Instrument (Long 1 unit):", 
+                options=instrument_options,
+                index=0,
+                key='trade_instrument_factor_table' 
+            )
             
             st.markdown("---")
             
-            # 3. Calculate all factor hedges
-            factor_results_df, error_msg = calculate_all_factor_hedges(
-                trade_selection_factor, 
-                factor_selection, 
-                factor_sensitivities_df, 
-                Sigma_Raw_df
-            )
+            # 3. Loop through all available factors and calculate the best hedge for each
+            summary_results = []
             
-            # 4. Display Results
-            if error_msg:
-                st.error(f"Factor hedge calculation failed: {error_msg}")
-            elif not factor_results_df.empty:
+            # The available factor options are the columns of factor_sensitivities_df
+            all_factors = factor_options 
+            
+            for target_factor in all_factors:
+                
+                # Calculate all hedge candidates for the current target_factor
+                factor_results_df, error_msg = calculate_all_factor_hedges(
+                    trade_selection_factor, 
+                    target_factor, 
+                    factor_sensitivities_df, 
+                    Sigma_Raw_df
+                )
+                
+                if error_msg:
+                    # Log the error but continue looping for other factors
+                    st.warning(f"Skipped calculation for {target_factor} (Error: {error_msg}).")
+                    continue
                 
                 # Filter out hedges with near-zero factor sensitivity (Ratio is meaningless/too large)
                 factor_results_df_clean = factor_results_df.dropna(subset=['Residual Volatility (BPS)'])
 
-                if factor_results_df_clean.empty:
-                    st.info("No valid hedge candidates could be successfully processed. Check if any instrument has non-zero sensitivity to the selected factor.")
-                    # Fallback to display the sensitivities table later
-                    pass
-                else:
-                    
-                    # --- New Logic Starts Here: Generating the 6-Row Detailed Table ---
-                    
-                    # 4.1 Identify the BEST hedge (lowest Residual Volatility)
+                if not factor_results_df_clean.empty:
+                    # Find the SINGLE best hedge (minimum residual volatility) for the current factor
                     best_hedge_row = factor_results_df_clean.iloc[0]
-                    best_hedge_key = best_hedge_row['Hedge Instrument']
-                    k_factor = best_hedge_row['Factor Hedge Ratio (k_factor)']
-                    trade_key = trade_selection_factor
                     
-                    # 4.2 Trade and Hedge Data Extraction
-                    
-                    # Trade Sensitivities to PC1, PC2, PC3 (Row 1) - Note: columns are Factor Names (Level, Slope, Curvature)
-                    trade_pc_sensitivities = factor_sensitivities_df.loc[trade_key].to_dict()
-                    
-                    # Hedge Sensitivities to PC1, PC2, PC3 (Row 3)
-                    hedge_pc_sensitivities = factor_sensitivities_df.loc[best_hedge_key].to_dict()
-                    
-                    # Hedge Mispricing (Market - PCA_Fair in BPS) (Row 4)
-                    # Mispricing is fetched from the combined mispricing_df created earlier
-                    if best_hedge_key in mispricing_df.index:
-                        hedge_mispricing = mispricing_df.loc[best_hedge_key, 'Residual (BPS)']
+                    # Determine the Hedge Action (Short/Long) based on the Hedge Ratio
+                    k_factor_value = best_hedge_row[f'Factor Hedge Ratio (k_factor)']
+                    if k_factor_value > 0:
+                        hedge_action = 'Short'
+                    elif k_factor_value < 0:
+                        hedge_action = 'Long'
                     else:
-                        hedge_mispricing = np.nan
-                    
-                    # Hedge Direction (Row 5): k_factor > 0 means same factor exposure sign (OPPOSITE side needed for neutralization)
-                    hedge_direction = "OPPOSITE" if k_factor > 0 else "SAME" if k_factor < 0 else "NEUTRAL (Zero Exposure)"
-                    
-                    # Units (Absolute value of k_factor) (Row 6)
-                    hedge_units = abs(k_factor)
-                    
-                    # --- Constructing the NEW Detailed Analysis Table (6 Rows) ---
-                    
-                    factor_cols_full = ['Level (Whole Curve Shift)', 'Slope (Steepening/Flattening)', 'Curvature (Fly Risk)']
-                    
-                    # Create the data dictionary for the DataFrame
-                    data = {
-                        col: [
-                            trade_pc_sensitivities.get(col, np.nan),               # R1: Trade Sens
-                            f"BEST HEDGE: {best_hedge_key}",                       # R2: Hedge Name
-                            hedge_pc_sensitivities.get(col, np.nan),               # R3: Hedge Sens
-                            f'{hedge_mispricing:.2f} BPS' if not np.isnan(hedge_mispricing) else 'N/A', # R4: Mispricing
-                            hedge_direction,                                       # R5: Direction
-                            f'{hedge_units:.4f}',                                  # R6: Units
-                        ]
-                        for col in factor_cols_full # Iterate over the full set of 3 PC names
-                    }
-                    
-                    # Define row labels
-                    new_index = [
-                        f'1. Trade Sensitivity ({trade_key})',
-                        f'2. Best Hedge Instrument',
-                        f'3. Hedge Sensitivity ({best_hedge_key})',
-                        '4. Hedge Mispricing (Market - Fair Curve) (BPS)',
-                        '5. Execution Direction (Vs Trade)',
-                        '6. Units of Hedge Required (|k_factor|)'
-                    ]
-                    
-                    # Create DataFrame, dropping columns that weren't in factor_sensitivities_df (if pc_count < 3)
-                    display_df = pd.DataFrame(data, index=new_index).dropna(axis=1, how='all')
-                    
-                    # --- Styling and Display ---
-                    st.subheader(f"Detailed Factor Hedge Analysis for Trade: **{trade_key}** (Neutralizing **{factor_selection}**)")
-                    
-                    # Define row indices for easier styling reference
-                    R1, R2, R3, R4, R5, R6 = 0, 1, 2, 3, 4, 5
-                    
-                    # Get the column name of the neutralized factor
-                    factor_col_name = factor_selection 
-                    
-                    # Streamlit dataframe styling setup
-                    def style_hedge_table(s):
+                        hedge_action = 'N/A'
                         
-                        # R1 & R3: Sensitivities (Styling based on row)
-                        if s.name in display_df.index[[R1, R3]]:
-                            styles = []
-                            for col_name, val in s.items():
-                                style = 'font-weight: bold; background-color: #f0f0f5;' # Default for sensitivities
-                                if s.name == display_df.index[R3] and col_name == factor_col_name:
-                                    # Highlight the neutralized factor in R3 (Hedge Sensitivity)
-                                    style = 'background-color: #d9ead3; font-weight: bold; color: black;'
-                                styles.append(style)
-                            return styles
+                    # Prepare the result for the summary table
+                    summary_results.append({
+                        'Factor to Neutralize': target_factor,
+                        'Trade Sensitivity': best_hedge_row['Trade Sensitivity'],
+                        'Hedge Instrument': best_hedge_row['Hedge Instrument'],
+                        'Hedge Sensitivity': best_hedge_row['Hedge Sensitivity'],
+                        'Hedge Action': hedge_action,
+                        'Hedge Ratio (|k|)': abs(k_factor_value),
+                        'Residual Volatility (BPS)': best_hedge_row['Residual Volatility (BPS)'],
+                    })
 
-                        # R4: Mispricing (Styling based on value)
-                        if s.name == display_df.index[R4]:
-                            try:
-                                # Extract float value from the string in the first (or any) column
-                                val_str = s.iloc[0].replace(' BPS', '').replace('N/A', '') 
-                                val = float(val_str)
-                                # Mispriced (absolute value) > 0.05 BPS is considered relevant mispricing
-                                color = 'red' if val > 0.05 else 'green' if val < -0.05 else 'black'
-                                # Apply the style across all columns for this row
-                                return [f'color: {color}; font-weight: bold; background-color: #f7e6e5;'] * len(s)
-                            except:
-                                return ['background-color: #f7e6e5;'] * len(s)
 
-                        # R5: Direction (Styling based on string value)
-                        if s.name == display_df.index[R5]:
-                            color = 'red' if s.iloc[0] == 'OPPOSITE' else 'green' if s.iloc[0] == 'SAME' else 'gray'
-                            return [f'color: {color}; font-weight: bold;'] * len(s)
-                        
-                        # R2 & R6: Hedge Name and Units (Default highlight)
-                        if s.name in display_df.index[[R2, R6]]:
-                            return ['font-weight: bold; background-color: #e6f7ff;'] * len(s)
+            # 4. Display the comprehensive summary table
+            if summary_results:
+                # Convert list of dicts to a DataFrame
+                summary_df = pd.DataFrame(summary_results)
+                
+                st.subheader(f"Optimal Factor Hedges for Trade: **{trade_selection_factor}**")
+                st.markdown("The optimal instrument to neutralize each factor (Level, Slope, Curvature) is determined by minimizing the resulting **Residual Volatility (BPS)** after applying the factor-neutralizing hedge ratio.")
+                
+                # Display the final summary table
+                st.dataframe(
+                    summary_df[[
+                        'Factor to Neutralize', 
+                        'Hedge Instrument', 
+                        'Hedge Action', 
+                        'Hedge Ratio (|k|)', 
+                        'Residual Volatility (BPS)',
+                        'Trade Sensitivity', 
+                        'Hedge Sensitivity'
+                    ]].style.format({
+                        'Trade Sensitivity': "{:.4f}",
+                        'Hedge Sensitivity': "{:.4f}",
+                        'Hedge Ratio (|k|)': "{:.4f}",
+                        'Residual Volatility (BPS)': "{:.2f}"
+                    }),
+                    use_container_width=True
+                )
+            
+            else:
+                 st.info(f"No valid factor hedge candidates found for trade **{trade_selection_factor}** across Level, Slope, or Curvature.")
 
-                        return [''] * len(s)
-
-                    # Identify the columns that contain numerical sensitivity data (R1 and R3)
-                    numerical_cols = [col for col in display_df.columns if col in factor_cols_full]
-                    
-                    # Apply standard float formatting to the sensitivity rows (R1 and R3)
-                    styled_df = display_df.style.apply(style_hedge_table, axis=1).format(
-                        '{:.4f}', 
-                        subset=pd.IndexSlice[[display_df.index[R1], display_df.index[R3]], numerical_cols],
-                        na_rep='N/A'
-                    )
-                    
-                    # Display the new detailed analysis table
-                    st.dataframe(
-                        styled_df,
-                        use_container_width=True
-                    )
-                    
-                    # Display the residual volatility for the hedge quality
-                    st.metric(
-                        label=f"Residual Volatility after Neutralizing {factor_selection} with {best_hedge_key}", 
-                        value=f"{best_hedge_row['Residual Volatility (BPS)']:.2f} BPS",
-                        delta_color="off" # No delta needed
-                    )
-
-            # Display full sensitivities table as before for reference (applies even if the 6-row table failed due to lack of hedge candidates)
+            # --- END MODIFICATION ---
+             
+            # Display full sensitivities table as before for reference
             st.markdown("---")
             st.subheader(f"Factor Sensitivities (Standardized Beta) Table for Reference")
             st.markdown("This shows the raw input exposures used for the ratio calculation.")
