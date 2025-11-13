@@ -8,7 +8,7 @@ import seaborn as sns
 from datetime import datetime, date
 
 # --- Configuration ---
-st.set_page_page_config(layout="wide", page_title="SOFR Futures PCA Analyzer")
+st.set_page_config(layout="wide", page_title="SOFR Futures PCA Analyzer")
 
 # --- Helper Functions for Data Processing ---
 
