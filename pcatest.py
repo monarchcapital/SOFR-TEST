@@ -179,7 +179,8 @@ def perform_pca(data_df):
     """Performs PCA on the input DataFrame (expected to be spreads for Fair Curve)."""
     data_df_clean = data_df.dropna()
     
-    if data_df_clean.empty or data_df_clean.shape[0] < data_df_clean.shape[1]:
+    if data_df_clean.empty or data_df_clean.shape[0] <= data_df_clean.shape[1]:
+        # PCA requires more data points (rows) than dimensions (columns)
         return None, None, None, None, None
 
     # Standardize the data (PCA on Correlation Matrix - preferred for spread PCA)
@@ -219,7 +220,8 @@ def perform_pca_on_prices(price_df):
     """
     data_df_clean = price_df.dropna()
     
-    if data_df_clean.empty or data_df_clean.shape[0] < data_df_clean.shape[1]:
+    if data_df_clean.empty or data_df_clean.shape[0] <= data_df_clean.shape[1]:
+        # PCA requires more data points (rows) than dimensions (columns)
         return None, None
         
     # Center the data, but DO NOT scale/standardize it (PCA on Covariance Matrix)
@@ -1455,4 +1457,16 @@ if not price_df_filtered.empty:
 
 
     else:
-        st.error("PCA failed. Please check your data quantity and quality.")
+        # --- IMPROVED ERROR HANDLING BLOCK ---
+        rows = analysis_curve_df.shape[0] if 'analysis_curve_df' in locals() and not analysis_curve_df.empty else 0
+        cols = analysis_curve_df.shape[1] if 'analysis_curve_df' in locals() and not analysis_curve_df.empty else 0
+        
+        st.error("🚨 **PCA Failed: Insufficient or Poor Quality Data.** 🚨")
+        st.markdown(f"""
+            **The PCA step failed. Please check the following:**
+            1.  **Historical Dates vs. Contracts:** PCA requires **more historical dates** (rows) than **contracts/spreads** (columns) to be mathematically stable.
+                * *Rows (Dates after filtering):* **{rows}**
+                * *Columns (Contracts in curve):* **{cols}**
+            2.  **Data Quality:** Ensure the CSV files were uploaded correctly, and the data within the selected date range is not all `NaN` or zero.
+            3.  **Spread Calculation:** Ensure at least two contracts are available to calculate the 3M spread.
+        """)
