@@ -139,7 +139,7 @@ def calculate_k_step_butterflies(analysis_curve_df, k):
 
     return pd.DataFrame(flies_data)
 
-# --- NEW: Double Butterfly Calculation Function ---
+# --- Double Butterfly Calculation Function ---
 @st.cache_data
 def calculate_k_step_double_butterflies(analysis_curve_df, k):
     """
@@ -243,7 +243,6 @@ def perform_pca_on_prices(price_df):
 
 # --- RECONSTRUCTION LOGIC ---
 
-# --- MODIFIED: _reconstruct_derivative now handles 'dbfly' ---
 def _reconstruct_derivative(original_df, reconstructed_prices, derivative_type='spread'):
     """
     Helper to reconstruct a derivative from the reconstructed price curve.
@@ -262,7 +261,7 @@ def _reconstruct_derivative(original_df, reconstructed_prices, derivative_type='
         
         try:
             if derivative_type == 'spread':
-                # Spread: C_i - C_{i+k}. Label is C_i-C_{i+k} (e.g., Z25-M26)
+                # Spread: C_i - C_{i+k}. Label is X Spread: C_i-C_{i+k} (e.g., 3M Spread: Z25-M26)
                 if ':' in label:
                     core_label = label.split(': ')[1] 
                 else:
@@ -275,7 +274,7 @@ def _reconstruct_derivative(original_df, reconstructed_prices, derivative_type='
                 )
             
             elif derivative_type == 'fly':
-                # Fly: C_i - 2 * C_{i+k} + C_{i+2k}. Label format: C_i-2xC_{i+k}+C_{i+2k}
+                # Fly: C_i - 2 * C_{i+k} + C_{i+2k}. Label format: X Fly: C_i-2xC_{i+k}+C_{i+2k}
                 if ':' in label:
                     core_label = label.split(': ')[1] 
                 else:
@@ -295,7 +294,7 @@ def _reconstruct_derivative(original_df, reconstructed_prices, derivative_type='
                 )
             
             elif derivative_type == 'dbfly':
-                # Double Fly: C_i - 3 * C_{i+k} + 3 * C_{i+2k} - C_{i+3k}. Label format: C_i-3xC_{i+k}+3xC_{i+2k}-C_{i+3k}
+                # Double Fly: C_i - 3 * C_{i+k} + 3 * C_{i+2k} - C_{i+3k}. Label format: X Double Fly: C_i-3xC_{i+k}+3xC_{i+2k}-C_{i+3k}
                 if ':' in label:
                     core_label = label.split(': ')[1] 
                 else:
@@ -333,7 +332,6 @@ def _reconstruct_derivative(original_df, reconstructed_prices, derivative_type='
     return pd.merge(original_df_renamed, reconstructed_df, left_index=True, right_index=True)
 
 
-# --- MODIFIED: reconstruct_prices_and_derivatives now handles Double Butterflies ---
 def reconstruct_prices_and_derivatives(analysis_curve_df, reconstructed_spreads_3M_df, spreads_3M_df, spreads_6M_df, butterflies_3M_df, butterflies_6M_df, spreads_12M_df, butterflies_12M_df, double_butterflies_3M_df, double_butterflies_6M_df, double_butterflies_12M_df):
     """
     Reconstructs Outright Prices and all derivative types based on the 
@@ -695,6 +693,49 @@ def calculate_all_factor_hedges(trade_label, factor_name, factor_sensitivities_d
     
     return results_df, None
 
+# --- NEW HELPER FUNCTION for Mispricing ---
+def calculate_derivative_mispricings(historical_derivatives_list, analysis_dt):
+    """
+    Calculates the mispricing (Original - PCA Fair) in BPS for all derivatives 
+    on the analysis date.
+    
+    Args:
+        historical_derivatives_list (list[pd.DataFrame]): List of all historical derivative DFs 
+                                                         (containing 'Original' and 'PCA' columns).
+        analysis_dt (datetime.datetime): The single analysis date for the snapshot.
+
+    Returns:
+        pd.Series: Series indexed by derivative label (without suffix), with mispricing in BPS as values.
+    """
+    mispricing_data = {}
+    
+    # Ensure analysis_dt is aligned to the dataframe index (usually date component or string format)
+    analysis_date_key = analysis_dt.strftime('%Y-%m-%d')
+    
+    for df in historical_derivatives_list:
+        if df.empty or analysis_date_key not in df.index:
+            continue
+            
+        try:
+            # Try to get the row by the string key (works for DatetimeIndex)
+            row = df.loc[analysis_date_key]
+        except KeyError:
+            continue
+        
+        # Iterate through all derivative columns that contain the original value
+        for original_col in [col for col in df.columns if ' (Original)' in col]:
+            pca_col = original_col.replace(' (Original)', ' (PCA)')
+            
+            if pca_col in row and not pd.isna(row[original_col]) and not pd.isna(row[pca_col]):
+                # Remove the suffix to get the clean derivative label (e.g., '3M Spread: Z25-H26')
+                derivative_label = original_col.replace(' (Original)', '')
+                
+                # Calculate mispricing in BPS: (Original - PCA Fair) * 10000
+                mispricing = (row[original_col] - row[pca_col]) * 10000
+                mispricing_data[derivative_label] = mispricing
+                
+    return pd.Series(mispricing_data, name='Hedge Mispricing (BPS)')
+# --- END NEW HELPER FUNCTION ---
 
 # --- Streamlit Application Layout ---
 
@@ -782,17 +823,17 @@ if not price_df_filtered.empty:
     # 3M (k=1) - Used for PCA input
     spreads_3M_df_raw = calculate_k_step_spreads(analysis_curve_df, 1) # No prefix here
     butterflies_3M_df = calculate_k_step_butterflies(analysis_curve_df, 1)
-    double_butterflies_3M_df = calculate_k_step_double_butterflies(analysis_curve_df, 1) # <--- NEW
+    double_butterflies_3M_df = calculate_k_step_double_butterflies(analysis_curve_df, 1) 
     
     # 6M (k=2)
     spreads_6M_df = calculate_k_step_spreads(analysis_curve_df, 2)
     butterflies_6M_df = calculate_k_step_butterflies(analysis_curve_df, 2)
-    double_butterflies_6M_df = calculate_k_step_double_butterflies(analysis_curve_df, 2) # <--- NEW
+    double_butterflies_6M_df = calculate_k_step_double_butterflies(analysis_curve_df, 2) 
     
     # 12M (k=4)
     spreads_12M_df = calculate_k_step_spreads(analysis_curve_df, 4)
     butterflies_12M_df = calculate_k_step_butterflies(analysis_curve_df, 4)
-    double_butterflies_12M_df = calculate_k_step_double_butterflies(analysis_curve_df, 4) # <--- NEW
+    double_butterflies_12M_df = calculate_k_step_double_butterflies(analysis_curve_df, 4) 
     
     
     # Display the number of contracts and derivatives
@@ -959,7 +1000,6 @@ if not price_df_filtered.empty:
         )
 
         # 2. Reconstruct Outright Prices and ALL Derivatives (3M, 6M, 12M)
-        # MODIFIED: Passes and receives the new Double Butterfly DFs
         historical_outrights_df, historical_spreads_3M_df, historical_butterflies_3M_df, historical_spreads_6M_df, historical_butterflies_6M_df, historical_spreads_12M_df, historical_butterflies_12M_df, historical_double_butterflies_3M_df, historical_double_butterflies_6M_df, historical_double_butterflies_12M_df, spreads_3M_df_no_prefix = reconstruct_prices_and_derivatives(
             analysis_curve_df, 
             reconstructed_spreads_3M, 
@@ -969,10 +1009,21 @@ if not price_df_filtered.empty:
             butterflies_6M_df, 
             spreads_12M_df, 
             butterflies_12M_df,
-            double_butterflies_3M_df, # <--- NEW
-            double_butterflies_6M_df, # <--- NEW
-            double_butterflies_12M_df # <--- NEW
+            double_butterflies_3M_df, 
+            double_butterflies_6M_df, 
+            double_butterflies_12M_df
         )
+
+        # --------------------------- New Mispricing Calculation for Section 8 ---------------------------
+        # Combine all historical derivative DFs (those containing Original and PCA columns)
+        all_historical_derivatives_list = [
+            historical_spreads_3M_df, historical_butterflies_3M_df, historical_double_butterflies_3M_df,
+            historical_spreads_6M_df, historical_butterflies_6M_df, historical_double_butterflies_6M_df,
+            historical_spreads_12M_df, historical_butterflies_12M_df, historical_double_butterflies_12M_df,
+        ]
+        
+        mispricing_series = calculate_derivative_mispricings(all_historical_derivatives_list, analysis_dt)
+        # --------------------------------------------------------------------------------------------------
 
 
         # --- Curve Snapshot (Section 5) ---
@@ -1123,7 +1174,7 @@ if not price_df_filtered.empty:
         else:
             st.info("Not enough contracts (need 3 or more) to calculate and plot 3M butterfly snapshot.")
             
-        # --- 5.4 Double Butterfly (DBF) Snapshot (3M) --- <--- NEW SUBSECTION
+        # --- 5.4 Double Butterfly (DBF) Snapshot (3M) --- 
         if not historical_double_butterflies_3M_df.empty:
             st.subheader(r"5.4 3M Double Butterfly (DBF) Snapshot ($k=1$, e.g., $Z25-3 \cdot H26+3 \cdot M26-U26$)")
             plot_snapshot(historical_double_butterflies_3M_df, "3M Double Butterfly", analysis_dt, pc_count)
@@ -1142,7 +1193,7 @@ if not price_df_filtered.empty:
         else:
             st.info("Not enough contracts (need 5 or more) to calculate and plot 6M butterfly snapshot.")
             
-        # --- 5.7 Double Butterfly (DBF) Snapshot (6M) --- <--- NEW SUBSECTION
+        # --- 5.7 Double Butterfly (DBF) Snapshot (6M) --- 
         if not historical_double_butterflies_6M_df.empty:
             st.subheader(r"5.7 6M Double Butterfly (DBF) Snapshot ($k=2$, e.g., $Z25-3 \cdot M26+3 \cdot Z26-M27$)")
             plot_snapshot(historical_double_butterflies_6M_df, "6M Double Butterfly", analysis_dt, pc_count)
@@ -1161,7 +1212,7 @@ if not price_df_filtered.empty:
         else:
             st.info("Not enough contracts (need 9 or more) to calculate and plot 12M butterfly snapshot.")
 
-        # --- 5.10 Double Butterfly (DBF) Snapshot (12M) --- <--- NEW SUBSECTION
+        # --- 5.10 Double Butterfly (DBF) Snapshot (12M) --- 
         if not historical_double_butterflies_12M_df.empty:
             st.subheader(r"5.10 12M Double Butterfly (DBF) Snapshot ($k=4$, e.g., $Z25-3 \cdot Z26+3 \cdot Z27-Z28$)")
             plot_snapshot(historical_double_butterflies_12M_df, "12M Double Butterfly", analysis_dt, pc_count)
@@ -1240,19 +1291,18 @@ if not price_df_filtered.empty:
         
         # 1. Combine all historical derivative time series into one DataFrame
         # **CRITICAL: Ensure all derivatives have unique, explicit prefixes**
-        # MODIFIED: Includes the new Double Butterfly DFs
         all_derivatives_list = [
             spreads_3M_df_raw.rename(columns=lambda x: f"3M Spread: {x}"), # Uses raw spread DF (no prefix)
             butterflies_3M_df.rename(columns=lambda x: f"3M Fly: {x}"),
-            double_butterflies_3M_df.rename(columns=lambda x: f"3M Double Fly: {x}"), # <--- NEW
+            double_butterflies_3M_df.rename(columns=lambda x: f"3M Double Fly: {x}"), 
             
             spreads_6M_df.rename(columns=lambda x: f"6M Spread: {x}"),
             butterflies_6M_df.rename(columns=lambda x: f"6M Fly: {x}"),
-            double_butterflies_6M_df.rename(columns=lambda x: f"6M Double Fly: {x}"), # <--- NEW
+            double_butterflies_6M_df.rename(columns=lambda x: f"6M Double Fly: {x}"), 
             
             spreads_12M_df.rename(columns=lambda x: f"12M Spread: {x}"),
             butterflies_12M_df.rename(columns=lambda x: f"12M Fly: {x}"),
-            double_butterflies_12M_df.rename(columns=lambda x: f"12M Double Fly: {x}") # <--- NEW
+            double_butterflies_12M_df.rename(columns=lambda x: f"12M Double Fly: {x}") 
         ]
         
         # Only keep non-empty dataframes
@@ -1357,7 +1407,6 @@ if not price_df_filtered.empty:
                 )
                 
                 if error_msg:
-                    # st.error(f"Cannot calculate factor hedge for {target_factor} (Error: {error_msg}).")
                     continue
                 
                 # Filter out hedges with near-zero factor sensitivity (Ratio is meaningless/too large)
@@ -1366,6 +1415,12 @@ if not price_df_filtered.empty:
                 if not factor_results_df_clean.empty:
                     # Find the SINGLE best hedge (minimum residual volatility) for the current factor
                     best_hedge_row = factor_results_df_clean.iloc[0]
+                    
+                    # --- FETCH HEDGE MISPRICING ---
+                    best_hedge_instrument = best_hedge_row['Hedge Instrument']
+                    # Use .get() to safely retrieve mispricing, defaulting to NaN if not found
+                    hedge_mispricing = mispricing_series.get(best_hedge_instrument, np.nan) 
+                    # ----------------------------
                     
                     # Determine the Hedge Action (Short/Long) based on the Hedge Ratio
                     k_factor_value = best_hedge_row[f'Factor Hedge Ratio (k_factor)']
@@ -1383,14 +1438,15 @@ if not price_df_filtered.empty:
                         'Hedge Sensitivity': best_hedge_row['Hedge Sensitivity'],
                         'Hedge Ratio (|k|)': abs(k_factor_value),
                         'Hedge Action': hedge_action,
-                        'Residual Volatility (BPS)': best_hedge_row['Residual Volatility (BPS)']
+                        'Residual Volatility (BPS)': best_hedge_row['Residual Volatility (BPS)'],
+                        'Hedge Mispricing (BPS)': hedge_mispricing # <-- NEW KEY ADDED
                     })
 
             # --- Display Summary Table of Best Factor Hedges ---
             if summary_results:
                 summary_df = pd.DataFrame(summary_results).sort_values(by='Residual Volatility (BPS)', ascending=True)
                 
-                # MODIFICATION: Changed the column order to prioritize actionable info and residual risk
+                # MODIFICATION: Insert 'Hedge Mispricing (BPS)' into the displayed columns
                 st.dataframe(
                     summary_df[[
                         'Factor to Neutralize', 
@@ -1398,13 +1454,15 @@ if not price_df_filtered.empty:
                         'Hedge Action', 
                         'Hedge Ratio (|k|)', 
                         'Residual Volatility (BPS)',
+                        'Hedge Mispricing (BPS)', # <-- NEW COLUMN
                         'Trade Sensitivity', 
                         'Hedge Sensitivity'
                     ]].style.format({
                         'Trade Sensitivity': "{:.4f}",
                         'Hedge Sensitivity': "{:.4f}",
                         'Hedge Ratio (|k|)': "{:.4f}",
-                        'Residual Volatility (BPS)': "{:.2f}"
+                        'Residual Volatility (BPS)': "{:.2f}",
+                        'Hedge Mispricing (BPS)': "{:.2f}", # <-- NEW FORMATTING
                     }),
                     use_container_width=True
                 )
@@ -1412,7 +1470,6 @@ if not price_df_filtered.empty:
             else:
                  st.info(f"No valid factor hedge candidates found for trade **{trade_selection_factor}** across Level, Slope, or Curvature.")
 
-            # --- END MODIFICATION ---
              
             # Display full sensitivities table as before for reference
             st.markdown("---")
