@@ -632,6 +632,92 @@ def calculate_factor_sensitivities(loadings_df_gen, pc_count):
     
     return factor_sensitivities
 
+# --- NEW FUNCTION FOR TRIPLE FACTOR NEUTRALIZATION CHECK ---
+def find_perfect_factor_hedge(trade_label, factor_sensitivities_df, mispricing_series, pc_count, tolerance=1e-4):
+    """
+    Identifies a single hedge instrument that can simultaneously neutralize the first
+    three principal components (Level, Slope, Curvature) for a given trade.
+    
+    Returns a dictionary of results or None if no perfect hedge is found.
+    """
+    if trade_label not in factor_sensitivities_df.index:
+        return {'error': f"Trade instrument '{trade_label}' not found in sensitivities.", 'result': None}
+    
+    available_factors = factor_sensitivities_df.columns.intersection(['Level (Whole Curve Shift)', 'Slope (Steepening/Flattening)', 'Curvature (Fly Risk)'])
+    
+    # Need at least 3 PCs for the triple neutralization check
+    if len(available_factors) < 3:
+        return {'error': f"Need at least 3 PCs (Level, Slope, Curvature) for triple neutralization check. Only {len(available_factors)} available.", 'result': None}
+    
+    # Filter trade sensitivities to the first three factors
+    T_sens = factor_sensitivities_df.loc[trade_label, available_factors]
+    
+    if T_sens.abs().sum() < 1e-9:
+        return {'error': "The trade itself has near-zero sensitivity to the first three factors, thus no hedging is needed for these factors.", 'result': None}
+
+    potential_hedges = [col for col in factor_sensitivities_df.index if col != trade_label]
+    
+    # Placeholder for the best hedge found based on tolerance
+    best_match_result = None
+    
+    for hedge_instrument in potential_hedges:
+        H_sens = factor_sensitivities_df.loc[hedge_instrument, available_factors]
+        
+        # Check if any factor sensitivity for the hedge is near zero
+        # If the hedge has near-zero exposure, the ratio blows up, so skip
+        if (H_sens.abs() < 1e-9).any():
+            continue
+            
+        # Calculate the three required hedge ratios: k = E(T) / E(H)
+        k_ratios = T_sens / H_sens
+        
+        k1, k2, k3 = k_ratios.values # k_PC1, k_PC2, k_PC3
+
+        # Check for near-equality of the ratios
+        diff1 = abs(k1 - k2)
+        diff2 = abs(k1 - k3)
+        diff3 = abs(k2 - k3)
+        
+        max_k_diff = max(diff1, diff2, diff3)
+
+        # Check if the largest difference is within tolerance
+        if max_k_diff < tolerance:
+            # Found a perfect hedge
+            avg_k = k_ratios.mean()
+            
+            # Determine hedge action
+            hedge_action = 'Short' if avg_k > 0 else 'Long'
+            
+            # Fetch mispricing
+            hedge_mispricing = mispricing_series.get(hedge_instrument, np.nan) 
+            
+            result = {
+                'Hedge Instrument': hedge_instrument,
+                'Trade PC1 Sensitivity': T_sens.iloc[0],
+                'Trade PC2 Sensitivity': T_sens.iloc[1],
+                'Trade PC3 Sensitivity': T_sens.iloc[2],
+                'Hedge PC1 Sensitivity': H_sens.iloc[0],
+                'Hedge PC2 Sensitivity': H_sens.iloc[1],
+                'Hedge PC3 Sensitivity': H_sens.iloc[2],
+                'Hedge Ratio (|k|)': abs(avg_k),
+                'Hedge Action': hedge_action,
+                'Hedge Mispricing (Rate %)': hedge_mispricing,
+                'Max K Difference': max_k_diff
+            }
+            # Since we found one, we store it and can break or continue to find the one with the smallest Max K Difference
+            # For simplicity, we just return the first one found that meets the tolerance, but for robustness,
+            # we should find the one with the minimum max_k_diff.
+            if best_match_result is None or max_k_diff < best_match_result.get('Max K Difference', tolerance):
+                best_match_result = result
+
+    if best_match_result:
+        return {'error': None, 'result': best_match_result}
+    else:
+        return {'error': f"No single hedge instrument was found to neutralize Level, Slope, and Curvature simultaneously within the tolerance of {tolerance:.0e}.", 'result': None}
+
+# --- END NEW FUNCTION ---
+
+
 def calculate_all_factor_hedges(trade_label, factor_name, factor_sensitivities_df, Sigma_Raw_df):
     """
     Calculates the Factor Hedge Ratio and the resulting Residual Volatility for all potential 
@@ -1233,7 +1319,7 @@ if not price_df_filtered.empty:
         This section calculates the **Minimum Variance Hedge Ratio ($k^*$ )** for a chosen **3M spread** trade, using *another 3M spread* as the hedge. The calculation uses the **Covariance Matrix** of the **3M spreads**, which is **reconstructed using the selected {pc_count} Principal Components**.
         * **Trade:** Long 1 unit of the selected 3M spread.
         * **Hedge:** Short $k^*$ units of the hedging 3M spread.
-        * **Volatility:** Expressed as **Rate %** (was BPS, now divided by 100).
+        * **Volatility:** Expressed as **Rate %** ($1\% = 100 \text{ BPS}$).
         """) # MODIFIED: Note on Rate % update
         
         if spreads_3M_df_clean.shape[1] < 2:
@@ -1293,7 +1379,7 @@ if not price_df_filtered.empty:
         This section calculates the **Minimum Variance Hedge Ratio ($k^*$ )** for *any* derivative trade, using *any* other derivative as a hedge. The calculation is based on the **full covariance matrix** of all derivatives, which is **reconstructed using the selected {pc_count} Principal Components** derived from the 3M Spreads.
         * **Trade:** Long 1 unit of the selected instrument.
         * **Hedge:** Short $k^*$ units of the hedging instrument.
-        * **Volatility:** Expressed as **Rate %** (was BPS, now divided by 100).
+        * **Volatility:** Expressed as **Rate %** ($1\% = 100 \text{ BPS}$).
         """) # MODIFIED: Note on Rate % update
 
         # --- HEDGING DATA PREPARATION (FOR SECTIONS 7 & 8) ---
@@ -1377,12 +1463,10 @@ if not price_df_filtered.empty:
         # --------------------------- 8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging - MODIFIED) ---------------------------
         st.header("8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging)")
         st.markdown(f"""
-        This strategy selects a hedge instrument to neutralize a trade's exposure to a **single, specific risk factor** (Level, Slope, or Curvature). The **Hedge Ratio ($k_{{factor}}$)** is determined purely by the ratio of sensitivities (factor exposures) of the trade and the hedge. The table below shows the calculated hedge ratio and the **Residual Volatility (Rate %)** *after* applying that factor hedge, calculated using the full $\Sigma_{{\text{{Raw}}}}$ covariance matrix.
-        * **Goal:** Neutralize exposure to the selected factor.
-        * **Formula:** $k_{{\text{{factor}}}} = \\frac{{\\text{{Sens}}(\\text{{Trade}}, \\text{{Factor}})}}{{\\text{{Sens}}(\\text{{Hedge}}, \\text{{Factor}})}}$
-        * **Sorting:** Results are sorted by **Residual Volatility (Rate %)** *after* hedging. The best factor hedge is the one with the lowest residual risk.
-        * **Mispricing/Volatility:** Expressed as **Rate %** (was BPS, now divided by 100).
-        """) # MODIFIED: Note on Rate % update
+        This strategy uses the Level, Slope, and Curvature factors (PC1, PC2, PC3) to identify hedges that neutralize specific factor exposures.
+        * **Factor Exposures:** Standardized sensitivities (Beta) to the principal components.
+        * **Volatility/Mispricing:** Expressed as **Rate %** ($1\% = 100 \text{ BPS}$).
+        """) 
         
         # 1. Calculate Factor Sensitivities (L_D columns renamed)
         factor_sensitivities_df = calculate_factor_sensitivities(loadings_df_gen, pc_count)
@@ -1406,7 +1490,68 @@ if not price_df_filtered.empty:
                 st.info("Results will display the best hedge for all factors.")
 
             st.markdown("---")
-            st.markdown(f"#### Factor Hedging Results for Trade: **{trade_selection_factor}**")
+
+            # --- 8.1 NEW: Triple Factor Neutralization Check ---
+            st.subheader(f"8.1 **Triple Factor Neutralization** Check (Trade: {trade_selection_factor})")
+            st.markdown(r"""
+            This checks if any *single* hedge instrument **($H$)** can simultaneously neutralize the trade's **Level, Slope, and Curvature** exposure. This requires the ratio of factor sensitivities ($\frac{E_{PCi}(T)}{E_{PCi}(H)}$) to be nearly identical for all three factors, resulting in a single hedge ratio ($k$):
+            $$\frac{E_{PC1}(T)}{E_{PC1}(H)} \approx \frac{E_{PC2}(T)}{E_{PC2}(H)} \approx \frac{E_{PC3}(T)}{E_{PC3}(H)} = k$$
+            """)
+            
+            # Check for Triple Factor Hedge
+            triple_hedge_check_result = find_perfect_factor_hedge(
+                trade_selection_factor, 
+                factor_sensitivities_df, 
+                mispricing_series, 
+                pc_count
+            )
+            
+            if triple_hedge_check_result['result'] is not None:
+                res = triple_hedge_check_result['result']
+                
+                # --- Display the results in a clear table ---
+                triple_data = {
+                    'Metric': [
+                        'Trade Instrument', 
+                        'Hedge Instrument (H)', 
+                        'Hedge Action',
+                        'Hedge Ratio (|k|)',
+                        'Trade PC1 (Level) Sensitivity', 
+                        'Hedge PC1 (Level) Sensitivity', 
+                        'Trade PC2 (Slope) Sensitivity',
+                        'Hedge PC2 (Slope) Sensitivity',
+                        'Trade PC3 (Curvature) Sensitivity',
+                        'Hedge PC3 (Curvature) Sensitivity',
+                        'Hedge Mispricing (Rate %)',
+                        'Max K Difference (Tolerance Check)'
+                    ],
+                    'Value': [
+                        trade_selection_factor,
+                        res['Hedge Instrument'],
+                        f"{res['Hedge Action']} {res['Hedge Ratio (|k|)']:.4f} units",
+                        f"{res['Hedge Ratio (|k|)']:.4f}",
+                        f"{res['Trade PC1 Sensitivity']:.4f}",
+                        f"{res['Hedge PC1 Sensitivity']:.4f}",
+                        f"{res['Trade PC2 Sensitivity']:.4f}",
+                        f"{res['Hedge PC2 Sensitivity']:.4f}",
+                        f"{res['Trade PC3 Sensitivity']:.4f}",
+                        f"{res['Hedge PC3 Sensitivity']:.4f}",
+                        f"{res['Hedge Mispricing (Rate %)']:.4f}" if not np.isnan(res['Hedge Mispricing (Rate %)']) else 'N/A',
+                        f"{res['Max K Difference']:.6e}"
+                    ]
+                }
+                
+                st.success(f"**PERFECT FACTOR HEDGE FOUND!** The instrument **{res['Hedge Instrument']}** can neutralize the first three factors simultaneously.")
+                st.table(pd.DataFrame(triple_data).set_index('Metric'))
+                
+            else:
+                st.info(triple_hedge_check_result['error'])
+
+            st.markdown("---") 
+
+            # --- 8.2 Single Factor Neutralization Results ---
+            st.subheader(f"8.2 **Single Factor Neutralization** Results (Trade: {trade_selection_factor})")
+            st.markdown(f"The best hedge for each single factor minimizes the total remaining (residual) risk after neutralizing that specific factor's exposure.")
             
             summary_results = []
             
@@ -1443,13 +1588,13 @@ if not price_df_filtered.empty:
                         
                     summary_results.append({
                         'Factor to Neutralize': target_factor,
-                        'Trade Sensitivity': best_hedge_row['Trade Sensitivity'],
                         'Hedge Instrument': best_hedge_row['Hedge Instrument'],
-                        'Hedge Sensitivity': best_hedge_row['Hedge Sensitivity'],
-                        'Hedge Ratio (|k|)': abs(k_factor_value),
                         'Hedge Action': hedge_action,
+                        'Hedge Ratio (|k|)': abs(k_factor_value),
                         'Residual Volatility (Rate %)': best_hedge_row['Residual Volatility (Rate %)'], # MODIFIED: Column name update
-                        'Hedge Mispricing (Rate %)': hedge_mispricing # MODIFIED: Column name update
+                        'Hedge Mispricing (Rate %)': hedge_mispricing, # MODIFIED: Column name update
+                        'Trade Sensitivity': best_hedge_row['Trade Sensitivity'],
+                        'Hedge Sensitivity': best_hedge_row['Hedge Sensitivity']
                     })
 
             # --- Display Summary Table of Best Factor Hedges ---
@@ -1484,7 +1629,7 @@ if not price_df_filtered.empty:
             # Display full sensitivities table as before for reference
             st.markdown("---")
             st.subheader(f"Factor Sensitivities (Standardized Beta) Table for Reference")
-            st.markdown("This shows the raw input exposures used for the ratio calculation.")
+            st.markdown("This shows the raw input exposures used for the ratio calculation. Note: Outright prices are not included here as factor hedging applies to the derivatives used in the PCA structure.")
             
             st.dataframe(
                 factor_sensitivities_df.style.format("{:.4f}"),
