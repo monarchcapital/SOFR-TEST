@@ -1369,7 +1369,9 @@ if not price_df_filtered.empty:
 
         # --------------------------- 8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging - REWRITTEN) ---------------------------
         st.header("8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging)")
-        st.markdown(f"""
+        
+        # FIX APPLIED HERE: Removed the 'f' from the st.markdown call
+        st.markdown("""
             This strategy selects a hedge instrument to neutralize a trade's exposure to a **single, specific risk factor** (Level, Slope, or Curvature). The hedge ratio ($k_{factor}$) is calculated as the ratio of sensitivities.
             * **Trade:** Long 1 unit of the selected instrument.
         """)
