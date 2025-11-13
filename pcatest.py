@@ -849,9 +849,11 @@ def create_instrument_universe_table(factor_sensitivities_df, Sigma_Raw_df, misp
         else:
             maturity = ''
             
-        # Full Type
-        full_type = f"{maturity} {instr_group}"
-        if maturity else instr_group
+        # Full Type (Corrected Syntax Error)
+        if maturity:
+            full_type = f"{maturity} {instr_group}"
+        else:
+            full_type = instr_group
             
         # Sensitivities (Handle missing factors if pc_count < 3)
         if instrument in factor_sensitivities_df.index:
@@ -1608,7 +1610,7 @@ if not price_df_filtered.empty:
         # --- 8.3 Instrument Universe Table ---
         st.subheader("8.3 Instrument Universe Table")
         st.markdown(f"Snapshot of all derivative instruments, including their standardized sensitivities to the first three principal components (Level, Slope, Curvature), their inherent total risk, and their mispricing relative to the {pc_count}-PC fair value.")
-        st.caption("Note: This table only includes **Spreads/Derivatives**. Outright contracts are excluded here as they do not have the same standardized Level/Slope/Curvature factor exposures.")
+        st.caption("Note: This table only includes **Spreads/Derivatives**. Outright contracts are excluded here as factor hedging applies to the derivatives used in the PCA structure.")
 
         # 1. Create the universe table
         instrument_universe_df = create_instrument_universe_table(factor_sensitivities_df, Sigma_Raw_df, mispricing_series)
