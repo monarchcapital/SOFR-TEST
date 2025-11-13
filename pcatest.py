@@ -911,6 +911,36 @@ if not price_df_filtered.empty:
         ax_spread_loading.set_ylabel('3M Spread Contract')
         plt.tight_layout()
         st.pyplot(fig_spread_loading)
+        
+        # --- 3.2 Outright Price Loadings (Non-Standard) --- (RE-ADDED)
+        st.subheader("3.2 Outright Price Loadings Heatmap (PC vs. Contracts)")
+        st.markdown("""
+            This heatmap shows the **Loadings** of the first few PCs on the **Outright Contract Prices**. 
+            These loadings are calculated using **PCA on the Covariance Matrix of Prices** (unstandardized).
+            * **Interpretation:** The shape of PC1 often represents the Level factor (a near-flat line), PC2 the Slope factor (a steepening/flattening twist), and PC3 the Curvature factor (a butterfly/hump shape).
+        """)
+        
+        loadings_price, explained_variance_price = perform_pca_on_prices(analysis_curve_df)
+        
+        if loadings_price is not None:
+            fig_price_loading, ax_price_loading = plt.subplots(figsize=(12, 6))
+            loadings_price_plot = loadings_price.iloc[:, :default_pc_count]
+            
+            sns.heatmap(
+                loadings_price_plot,
+                annot=True,
+                fmt=".2f",
+                cmap="RdBu_r",
+                cbar_kws={'label': 'Loading (Raw Sensitivity)'},
+                ax=ax_price_loading
+            )
+            ax_price_loading.set_title(f'Loadings of PC1-PC{default_pc_count} on Outright Contract Prices')
+            ax_price_loading.set_xlabel('Principal Component')
+            ax_price_loading.set_ylabel('Contract')
+            plt.tight_layout()
+            st.pyplot(fig_price_loading)
+        else:
+            st.warning("Outright Price PCA failed. Not enough clean data points for calculation.")
 
 
         # --- PC Scores Time Series (Section 4) ---
@@ -1199,8 +1229,8 @@ if not price_df_filtered.empty:
             This section calculates the **Minimum Variance Hedge Ratio ($k^*$ )** for a trade in a 3M spread, using only *other 3M spreads* as hedge instruments. 
             The covariance matrix used is reconstructed using the selected **{pc_count} Principal Components**.
             * **Trade:** Long 1 unit of the selected 3M Spread.
-            * **Hedge:** Short $k^*$ units of the hedging 3M Spread.
         """)
+        st.latex(r"\text{Hedge:} \quad \text{Short } k^* \text{ units of the hedging 3M Spread, where } k^* = \frac{Cov(T, H)}{Var(H)}")
         
         # --- HEDGING DATA PREPARATION (FOR SECTIONS 6, 7 & 8) ---
         
@@ -1230,22 +1260,13 @@ if not price_df_filtered.empty:
         )
         
         # 3. Calculate Factor Sensitivities (Betas) for all derivatives
-        # Factor Sensitivity = L_D * std_deriv / std_pc. Since L_D is standardized beta,
-        # we need to scale it back to raw beta.
-        # Beta_raw (derv on PC) = L_D * std_deriv / std_pc
-        # Since the scores are already standardized to have variance = 1 (by the nature of PCA scores
-        # on standardized input data), the standard deviation of scores is sqrt(eigenvalues), 
-        # but the scores used here (from pca.transform) are standardized.
-        # We will use the standardized loadings (L_D) as the *Factor Sensitivities* for simplicity,
-        # which is the common practice in PCA-based factor hedging literature (beta = loading).
-        
+        # Filter factor sensitivities to the first 3 (Level, Slope, Curvature)
         factor_sensitivities_df = loadings_derivatives_df.rename(columns={
             'PC1': 'Level (Whole Curve Shift)', 
             'PC2': 'Slope (Steepening/Flattening)', 
             'PC3': 'Curvature (Fly Risk)'
         })
         
-        # Filter factor sensitivities to the first 3 (Level, Slope, Curvature)
         factor_sensitivities_df = factor_sensitivities_df.filter(items=factor_sensitivities_df.columns[:3])
 
         # --- Section 6 Trade Selection ---
@@ -1301,8 +1322,8 @@ if not price_df_filtered.empty:
         st.markdown(f"""
             This section calculates the **Minimum Variance Hedge Ratio ($k^*$ )** for *any* derivative trade, using *any* other derivative as a hedge. The calculation is based on the **full covariance matrix** of all derivatives, which is **reconstructed using the selected {pc_count} Principal Components** derived from the 3M Spreads.
             * **Trade:** Long 1 unit of the selected instrument.
-            * **Hedge:** Short $k^*$ units of the hedging instrument.
         """)
+        st.latex(r"\text{Hedge:} \quad \text{Short } k^* \text{ units of the hedging instrument, where } k^* = \frac{Cov(T, H)}{Var(H)}")
         
         # --- Section 7 Trade Selection ---
         instrument_options = Sigma_Raw_df.index.tolist()
@@ -1349,10 +1370,10 @@ if not price_df_filtered.empty:
         # --------------------------- 8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging - REWRITTEN) ---------------------------
         st.header("8. PCA-Based Factor Hedging Strategy (Sensitivity Hedging)")
         st.markdown(f"""
-            This strategy selects a hedge instrument to neutralize a trade's exposure to a **single, specific risk factor** (Level, Slope, or Curvature). The hedge ratio ($k_{factor}$) is calculated as the ratio of sensitivities ($k_{factor} = \beta_{Trade} / \beta_{Hedge}$).
+            This strategy selects a hedge instrument to neutralize a trade's exposure to a **single, specific risk factor** (Level, Slope, or Curvature). The hedge ratio ($k_{factor}$) is calculated as the ratio of sensitivities.
             * **Trade:** Long 1 unit of the selected instrument.
-            * **Hedge:** Short $k_{factor}$ units of the hedging instrument.
         """)
+        st.latex(r"\text{Hedge:} \quad \text{Short } k_{factor} \text{ units of the hedging instrument, where } k_{factor} = \frac{\beta_{Trade}}{\beta_{Hedge}}")
 
     if factor_sensitivities_df is not None:
         
