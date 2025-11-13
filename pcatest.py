@@ -636,7 +636,7 @@ def calculate_factor_sensitivities(loadings_df_gen, pc_count):
 def find_perfect_factor_hedge(trade_label, factor_sensitivities_df, mispricing_series, pc_count, tolerance=1e-4):
     """
     Identifies a single hedge instrument that can simultaneously neutralize the first
-    three principal components (Level, Slope, Curvature) for a given trade.
+    three principal components (Level, Slope, and Curvature) for a given trade.
     
     Returns a dictionary of results or None if no perfect hedge is found.
     """
@@ -1104,7 +1104,7 @@ if not price_df_filtered.empty:
             double_butterflies_12M_df
         )
 
-        # --------------------------- New Mispricing Calculation for Section 8 ---------------------------
+        # --------------------------- Mispricing Calculation for Section 8 ---------------------------
         # Combine all historical derivative DFs (those containing Original and PCA columns)
         all_historical_derivatives_list = [
             historical_spreads_3M_df, historical_butterflies_3M_df, historical_double_butterflies_3M_df,
@@ -1315,12 +1315,13 @@ if not price_df_filtered.empty:
             
         # --------------------------- 6. PCA-Based Hedging Strategy (3M Spreads ONLY - Original Section) ---------------------------
         st.header("6. PCA-Based Hedging Strategy (3M Spreads ONLY - Original Section)")
+        # FIX: The following text must be wrapped in st.markdown() to prevent NameError
         st.markdown(f"""
         This section calculates the **Minimum Variance Hedge Ratio ($k^*$ )** for a chosen **3M spread** trade, using *another 3M spread* as the hedge. The calculation uses the **Covariance Matrix** of the **3M spreads**, which is **reconstructed using the selected {pc_count} Principal Components**.
         * **Trade:** Long 1 unit of the selected 3M spread.
         * **Hedge:** Short $k^*$ units of the hedging 3M spread.
-        * **Volatility:** Expressed as **Rate %** ($1\% = 100 \text{ BPS}$).
-        """) # MODIFIED: Note on Rate % update
+        * **Volatility:** Expressed as **Rate %** ($1\% = 100 \text{{ BPS}}$).
+        """) 
         
         if spreads_3M_df_clean.shape[1] < 2:
             st.warning("Not enough 3M spreads available to calculate a hedge.")
@@ -1379,7 +1380,7 @@ if not price_df_filtered.empty:
         This section calculates the **Minimum Variance Hedge Ratio ($k^*$ )** for *any* derivative trade, using *any* other derivative as a hedge. The calculation is based on the **full covariance matrix** of all derivatives, which is **reconstructed using the selected {pc_count} Principal Components** derived from the 3M Spreads.
         * **Trade:** Long 1 unit of the selected instrument.
         * **Hedge:** Short $k^*$ units of the hedging instrument.
-        * **Volatility:** Expressed as **Rate %** ($1\% = 100 \text{ BPS}$).
+        * **Volatility:** Expressed as **Rate %** ($1\% = 100 \text{{ BPS}}$).
         """) # MODIFIED: Note on Rate % update
 
         # --- HEDGING DATA PREPARATION (FOR SECTIONS 7 & 8) ---
@@ -1465,7 +1466,7 @@ if not price_df_filtered.empty:
         st.markdown(f"""
         This strategy uses the Level, Slope, and Curvature factors (PC1, PC2, PC3) to identify hedges that neutralize specific factor exposures.
         * **Factor Exposures:** Standardized sensitivities (Beta) to the principal components.
-        * **Volatility/Mispricing:** Expressed as **Rate %** ($1\% = 100 \text{ BPS}$).
+        * **Volatility/Mispricing:** Expressed as **Rate %** ($1\% = 100 \text{{ BPS}}$).
         """) 
         
         # 1. Calculate Factor Sensitivities (L_D columns renamed)
@@ -1495,7 +1496,7 @@ if not price_df_filtered.empty:
             st.subheader(f"8.1 **Triple Factor Neutralization** Check (Trade: {trade_selection_factor})")
             st.markdown(r"""
             This checks if any *single* hedge instrument **($H$)** can simultaneously neutralize the trade's **Level, Slope, and Curvature** exposure. This requires the ratio of factor sensitivities ($\frac{E_{PCi}(T)}{E_{PCi}(H)}$) to be nearly identical for all three factors, resulting in a single hedge ratio ($k$):
-            $$\frac{E_{PC1}(T)}{E_{PC1}(H)} \approx \frac{E_{PC2}(T)}{E_{PC2}(H)} \approx \frac{E_{PC3}(T)}{E_{PC3}(H)} = k$$
+            $$\frac{E_{Level}(T)}{E_{Level}(H)} \approx \frac{E_{Slope}(T)}{E_{Slope}(H)} \approx \frac{E_{Curvature}(T)}{E_{Curvature}(H)} = k$$
             """)
             
             # Check for Triple Factor Hedge
@@ -1621,6 +1622,23 @@ if not price_df_filtered.empty:
                     }),
                     use_container_width=True
                 )
+                
+                # --- NEW EXPLANATION OF THE TABLE ---
+                st.markdown("---")
+                st.markdown("### 💡 Explanation of Single Factor Hedging Results")
+                st.markdown("""
+                The table in **Section 8.2** shows the **ideal hedge instrument** to neutralize the risk from a *single, specific market factor* (Level, Slope, or Curvature).
+
+                A hedge is considered 'better' in this context because it **minimizes the Residual Volatility** for that specific factor's risk:
+                
+                1.  **Factor Neutralization:** The `Factor Hedge Ratio (|k|)` is calculated as the ratio of the Trade's sensitivity to the Hedge's sensitivity for the target factor ($\frac{E_{Factor}(T)}{E_{Factor}(H)}$). When you enter the trade and the hedge at this ratio, the total portfolio exposure to that factor becomes zero.
+                
+                2.  **Minimum Residual Volatility:** While the factor risk is zeroed out, residual risk from **all other factors** remains. The instrument displayed is the one that achieves that **factor neutrality** while simultaneously resulting in the **lowest overall residual risk** (as measured by `Residual Volatility (Rate %)`). This is determined using the full covariance matrix (Section 7's $\Sigma_{Raw}$) to precisely calculate the remaining, unhedged volatility.
+
+                3.  **Hedge Mispricing (Rate %):** This column provides the key trading signal. It shows the difference between the market price of the hedge instrument and its PCA Fair Value (`Original Price - PCA Fair Value`).
+                    * **A high absolute mispricing** combined with a **low residual volatility** suggests a potentially **high-quality, high-alpha trade**. You are using an attractively mispriced instrument to neutralize a major risk factor, leaving only minimal idiosyncratic (unexplained) risk.
+                """)
+                # --- END NEW EXPLANATION ---
             
             else:
                  st.info(f"No valid factor hedge candidates found for trade **{trade_selection_factor}** across Level, Slope, or Curvature.")
